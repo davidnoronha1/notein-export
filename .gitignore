@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.zig-cache/
+zig-out/
+web/src/wasm/*.wasm
+*.in
+fixtures/
