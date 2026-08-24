@@ -38,6 +38,8 @@ var g_page_info_buf: []PageInfo = &.{};
 var g_image_draw_buf: []ImageDraw = &.{};
 var g_textbox_draw_buf: []TextBoxDraw = &.{};
 var g_bytes_buf: []u8 = &.{};
+var g_vector_poly_buf: []VectorPoly = &.{};
+var g_vector_vertex_buf: []f32 = &.{}; // flat x0,y0,x1,y1,... pairs, indexed by VectorPoly.vertex_offset
 
 const PageInfo = extern struct { width: f32, height: f32, unbounded: u32, color: u32 };
 // creation_time is epoch milliseconds (fits exactly in f64's 53-bit mantissa,
@@ -45,6 +47,9 @@ const PageInfo = extern struct { width: f32, height: f32, unbounded: u32, color:
 // image/text compositing with ink rendering in true chronological/stacking order.
 const ImageDraw = extern struct { left: f32, top: f32, right: f32, bottom: f32, name_ptr: u32, name_len: u32, creation_time: f64 };
 const TextBoxDraw = extern struct { left: f32, top: f32, right: f32, bottom: f32, size: f32, color: u32, text_ptr: u32, text_len: u32, creation_time: f64 };
+// f64 first so the natural C layout doesn't need to insert padding before it
+// (matters since JS reads this by fixed byte stride -- see POLY_STRIDE in loader.ts).
+const VectorPoly = extern struct { creation_time: f64, color: u32, vertex_offset: u32, vertex_count: u32 };
 
 /// Allocates `len` bytes in wasm linear memory for the caller (JS) to write
 /// into before calling `set_active_window` or `get_bytes` (small, transient
@@ -142,6 +147,7 @@ export fn render_viewport(
     pixel_h: u32,
     time_min: f64,
     time_max: f64,
+    min_stroke_px: f32,
 ) u32 {
     const s = &(g_state orelse return 0);
 
@@ -179,15 +185,83 @@ export fn render_viewport(
             if (intersects(bounds, cull) and t >= time_min and t < time_max) filtered_order.append(ref) catch {};
         }
 
+        const min_width_world: f32 = if (min_stroke_px > 0) min_stroke_px / scale else 0;
         raster.renderPageContent(canvas, .{
             .strokes = content.strokes,
             .shapes = content.shapes,
             .text_boxes = &.{}, // text is drawn natively by JS via get_visible_textbox_*
             .order = filtered_order.items,
-        });
+        }, min_width_world);
     }
 
     return @intFromPtr(g_canvas_buf.ptr);
+}
+
+/// Returns the strokes+shapes intersecting the world-space viewport rect AND
+/// creation_time range as vector polygon outlines (SVG/vector export), not
+/// rasterized pixels -- each stroke becomes one filled polygon (the same
+/// variable-width ribbon `render_viewport` rasterizes), each shape edge
+/// becomes one filled quad. Resolution-independent, so unlike
+/// `render_viewport` there's no pixel size to request.
+export fn get_vector_content_count(page_index: u32, x: f32, y: f32, w: f32, h: f32, time_min: f64, time_max: f64) u32 {
+    const s = &(g_state orelse return 0);
+    const cull = model.Bounds{ .left = x, .top = y, .right = x + w, .bottom = y + h };
+
+    var polys = std.array_list.Managed(VectorPoly).init(gpa);
+    var verts = std.array_list.Managed(f32).init(gpa);
+
+    if (s.win.get(page_index)) |content| {
+        for (content.order) |ref| {
+            switch (ref.kind) {
+                .stroke => {
+                    const st = content.strokes[ref.index];
+                    const t: f64 = @floatFromInt(st.creation_time);
+                    if (!intersects(st.bounds, cull) or t < time_min or t >= time_max) continue;
+                    const poly = raster.tessellateStrokeScratch(st.points, st.width);
+                    if (poly.len < 3) continue;
+                    appendPoly(&polys, &verts, st.color, t, poly) catch break;
+                },
+                .shape => {
+                    const sh = content.shapes[ref.index];
+                    const t: f64 = @floatFromInt(sh.creation_time);
+                    if (!intersects(sh.bounds, cull) or t < time_min or t >= time_max) continue;
+                    if (sh.points.len >= 3) {
+                        var i: usize = 0;
+                        while (i < sh.points.len) : (i += 1) {
+                            const quad = raster.quadForLine(sh.points[i], sh.points[(i + 1) % sh.points.len], sh.width);
+                            appendPoly(&polys, &verts, sh.color, t, &quad) catch break;
+                        }
+                    } else if (sh.points.len == 2) {
+                        const quad = raster.quadForLine(sh.points[0], sh.points[1], sh.width);
+                        appendPoly(&polys, &verts, sh.color, t, &quad) catch {};
+                    }
+                },
+            }
+        }
+    }
+
+    gpa.free(g_vector_poly_buf);
+    g_vector_poly_buf = polys.toOwnedSlice() catch &.{};
+    gpa.free(g_vector_vertex_buf);
+    g_vector_vertex_buf = verts.toOwnedSlice() catch &.{};
+    return @intCast(g_vector_poly_buf.len);
+}
+
+fn appendPoly(polys: *std.array_list.Managed(VectorPoly), verts: *std.array_list.Managed(f32), color: u32, creation_time: f64, poly: []const [2]f32) !void {
+    const offset: u32 = @intCast(verts.items.len / 2);
+    for (poly) |v| {
+        try verts.append(v[0]);
+        try verts.append(v[1]);
+    }
+    try polys.append(.{ .creation_time = creation_time, .color = color, .vertex_offset = offset, .vertex_count = @intCast(poly.len) });
+}
+
+export fn get_vector_content_poly_ptr() u32 {
+    return @intFromPtr(g_vector_poly_buf.ptr);
+}
+
+export fn get_vector_content_vertex_ptr() u32 {
+    return @intFromPtr(g_vector_vertex_buf.ptr);
 }
 
 fn intersects(a: model.Bounds, b: model.Bounds) bool {

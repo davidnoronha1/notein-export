@@ -72,6 +72,13 @@
       #drop-zone button:hover {
         background: #292929;
       }
+      #drop-zone.loading button {
+        opacity: 0.5;
+        pointer-events: none;
+      }
+      #drop-zone.loading p {
+        color: #8ab0ff;
+      }
       #status {
         position: absolute;
         top: 12px;
@@ -81,7 +88,7 @@
         background: rgba(0, 0, 0, 0.6);
         padding: 4px 8px;
         border-radius: 6px;
-        z-index: 5;
+        z-index: 15;
         pointer-events: none;
       }
       #stats {
@@ -104,7 +111,7 @@
         left: 0;
         width: 100%;
         height: 3px;
-        z-index: 6;
+        z-index: 20;
         overflow: hidden;
         background: transparent;
         pointer-events: none;
@@ -119,11 +126,113 @@
         width: 40%;
         height: 100%;
         background: #4f8cff;
+        /* Animates `transform`, not `left` -- `left` needs main-thread layout
+           every frame, which stalls for the whole duration of the synchronous,
+           main-thread-blocking wasm.openFile() parse triggered right after
+           this bar is shown (freezing the bar for that whole time). A pure
+           transform animation can be handed to the compositor thread, which
+           keeps ticking even while the main thread is blocked. */
         animation: progress-slide 1.1s ease-in-out infinite;
+        will-change: transform;
       }
       @keyframes progress-slide {
-        0% { left: -40%; }
-        100% { left: 100%; }
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(250%); }
+      }
+      #export-control {
+        position: absolute;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: rgba(0, 0, 0, 0.6);
+        padding: 6px 10px;
+        border-radius: 20px;
+        z-index: 5;
+      }
+      #export-control.hidden {
+        display: none;
+      }
+      #export-control button {
+        font-size: 12px;
+        padding: 5px 10px;
+        border-radius: 14px;
+        border: 1px solid #555;
+        background: #1e1e1e;
+        color: #eee;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      #export-control button:hover {
+        background: #2a2a2a;
+      }
+      #export-control button.active {
+        background: #4f8cff;
+        border-color: #4f8cff;
+      }
+      #export-control select {
+        font-size: 12px;
+        padding: 4px 6px;
+        border-radius: 10px;
+        border: 1px solid #555;
+        background: #1e1e1e;
+        color: #eee;
+      }
+      #export-control .sep {
+        width: 1px;
+        height: 18px;
+        background: #444;
+      }
+      #selection-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 4;
+        pointer-events: none;
+      }
+      #selection-overlay.active {
+        pointer-events: auto;
+        cursor: crosshair;
+      }
+      #selection-rect {
+        position: absolute;
+        border: 2px dashed #4f8cff;
+        background: rgba(79, 140, 255, 0.12);
+        display: none;
+        pointer-events: none;
+      }
+      #export-panel {
+        position: absolute;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        background: rgba(20, 20, 20, 0.92);
+        border: 1px solid #444;
+        padding: 8px;
+        border-radius: 10px;
+        z-index: 6;
+      }
+      #export-panel.hidden {
+        display: none;
+      }
+      #export-panel .row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      #export-panel button,
+      #export-panel select {
+        font-size: 12px;
+        padding: 5px 8px;
+        border-radius: 8px;
+        border: 1px solid #555;
+        background: #1e1e1e;
+        color: #eee;
+        cursor: pointer;
+      }
+      #export-panel button:hover {
+        background: #2a2a2a;
       }
       #zoom-control {
         position: absolute;
@@ -144,15 +253,15 @@
         width: 140px;
       }
       #zoom-control button {
-        width: 22px;
-        height: 22px;
+        width: 32px;
+        height: 32px;
         line-height: 1;
         padding: 0;
         border-radius: 50%;
         border: 1px solid #555;
         background: #1e1e1e;
         color: #eee;
-        font-size: 15px;
+        font-size: 22px;
         cursor: pointer;
         flex: 0 0 auto;
       }
@@ -161,7 +270,7 @@
       }
       #zoom-label {
         color: #ddd;
-        font-size: 12px;
+        font-size: 15px;
         min-width: 3.5em;
         text-align: right;
         font-variant-numeric: tabular-nums;
@@ -218,6 +327,29 @@
         <div id="status"></div>
         <div id="stats"></div>
         <div id="progress-bar" class="hidden"><div id="progress-bar-fill"></div></div>
+        <div id="export-control" class="hidden">
+          <select id="export-scale" aria-label="Export resolution">
+            <option value="1">1x</option>
+            <option value="2">2x</option>
+            <option value="4" selected>4x</option>
+          </select>
+          <button id="select-tool" type="button">Select region…</button>
+          <div class="sep"></div>
+          <button id="export-page-png" type="button">Export page PNG</button>
+          <button id="export-page-pdf" type="button">Export page PDF</button>
+          <button id="export-page-svg" type="button">Export page SVG</button>
+        </div>
+        <div id="selection-overlay">
+          <div id="selection-rect"></div>
+        </div>
+        <div id="export-panel" class="hidden">
+          <div class="row">
+            <button id="export-region-png" type="button">Export PNG</button>
+            <button id="export-region-pdf" type="button">Export PDF</button>
+            <button id="export-region-svg" type="button">Export SVG</button>
+            <button id="export-region-cancel" type="button" aria-label="Cancel selection">&times;</button>
+          </div>
+        </div>
         <div id="zoom-control" class="hidden">
           <button id="zoom-out" type="button" aria-label="Zoom out">&minus;</button>
           <input id="zoom-slider" type="range" min="0" max="100" step="0.5" value="50" />
@@ -227,7 +359,7 @@
       </div>
       <div id="minimap" class="hidden"></div>
       <div id="drop-zone">
-        <p>Drag &amp; drop a Notein <code>.in</code> file here</p>
+        <p id="drop-message">Drag &amp; drop a Notein <code>.in</code> file here</p>
         <button id="open-button" type="button">Or choose a file…</button>
         <input id="file-input" type="file" accept=".in" />
       </div>

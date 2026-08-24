@@ -22,6 +22,7 @@ interface NoteinExports {
     pixelH: number,
     timeMin: number,
     timeMax: number,
+    minStrokePx: number,
   ): number;
   get_visible_image_count(pageIndex: number, x: number, y: number, w: number, h: number): number;
   get_visible_image_ptr(): number;
@@ -29,6 +30,9 @@ interface NoteinExports {
   get_visible_textbox_ptr(): number;
   get_bytes(namePtr: number, nameLen: number): number;
   get_bytes_len(): number;
+  get_vector_content_count(pageIndex: number, x: number, y: number, w: number, h: number, timeMin: number, timeMax: number): number;
+  get_vector_content_poly_ptr(): number;
+  get_vector_content_vertex_ptr(): number;
 }
 
 export interface PageInfo {
@@ -61,6 +65,13 @@ export interface TextBoxDraw {
 const PAGE_INFO_STRIDE = 16; // f32 width, f32 height, u32 unbounded, u32 color
 const IMAGE_DRAW_STRIDE = 32; // 4x f32 bounds, u32 name_ptr, u32 name_len, f64 creation_time
 const TEXTBOX_DRAW_STRIDE = 40; // 4x f32 bounds, f32 size, u32 color, u32 text_ptr, u32 text_len, f64 creation_time
+const VECTOR_POLY_STRIDE = 24; // f64 creation_time, u32 color, u32 vertex_offset, u32 vertex_count
+
+export interface VectorPoly {
+  color: number; // packed ARGB
+  creationTime: number;
+  points: Float32Array; // flat [x0, y0, x1, y1, ...]
+}
 
 export class NoteinModule {
   private constructor(private readonly exports: NoteinExports) {}
@@ -148,8 +159,9 @@ export class NoteinModule {
     pixelH: number,
     timeMin = -Infinity,
     timeMax = Infinity,
+    minStrokePx = 0,
   ): Uint8ClampedArray {
-    const ptr = this.exports.render_viewport(pageIndex, x, y, w, h, pixelW, pixelH, timeMin, timeMax);
+    const ptr = this.exports.render_viewport(pageIndex, x, y, w, h, pixelW, pixelH, timeMin, timeMax, minStrokePx);
     return new Uint8ClampedArray(this.memory, ptr, pixelW * pixelH * 4);
   }
 
@@ -193,6 +205,40 @@ export class NoteinModule {
         text: this.readString(textPtr, textLen),
         creationTime: view.getFloat64(base + 32, true),
       });
+    }
+    return out;
+  }
+
+  /**
+   * Returns strokes+shapes intersecting the given viewport/time range as
+   * vector polygon outlines (for SVG/vector export), not rasterized pixels --
+   * resolution-independent, so there's no pixel size to request. Each
+   * `points` array is copied out of wasm memory immediately (unlike
+   * `renderViewport`'s view), since it's cheap here and avoids the caller
+   * needing to worry about wasm memory growth invalidating it mid-export.
+   */
+  getVectorContent(
+    pageIndex: number,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    timeMin = -Infinity,
+    timeMax = Infinity,
+  ): VectorPoly[] {
+    const count = this.exports.get_vector_content_count(pageIndex, x, y, w, h, timeMin, timeMax);
+    const polyPtr = this.exports.get_vector_content_poly_ptr();
+    const vertexPtr = this.exports.get_vector_content_vertex_ptr();
+    const view = new DataView(this.memory, polyPtr, count * VECTOR_POLY_STRIDE);
+    const out: VectorPoly[] = [];
+    for (let i = 0; i < count; i++) {
+      const base = i * VECTOR_POLY_STRIDE;
+      const creationTime = view.getFloat64(base + 0, true);
+      const color = view.getUint32(base + 8, true);
+      const vertexOffset = view.getUint32(base + 12, true);
+      const vertexCount = view.getUint32(base + 16, true);
+      const points = new Float32Array(this.memory, vertexPtr + vertexOffset * 8, vertexCount * 2).slice();
+      out.push({ color, creationTime, points });
     }
     return out;
   }

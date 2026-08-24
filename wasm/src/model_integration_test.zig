@@ -7,7 +7,13 @@ test "model.open: diary.in loads with expected shape" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const file_bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "../fixtures/diary.in", a, .limited(300 * 1024 * 1024));
+    const file_bytes = std.Io.Dir.cwd().readFileAlloc(std.testing.io, "../fixtures/diary.in", a, .limited(300 * 1024 * 1024)) catch |err| {
+        if (err == error.FileNotFound) {
+            std.debug.print("skip: fixtures/diary.in not found -- skipping\n", .{});
+            return error.SkipZigTest;
+        }
+        return err;
+    };
     const note = try model.open(a, std.testing.allocator, file_bytes);
     defer std.testing.allocator.free(@constCast(note.db.bytes));
 

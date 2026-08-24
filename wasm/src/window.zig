@@ -81,9 +81,9 @@ fn decodeStroke(alloc: std.mem.Allocator, note: *const model.Note, entry: model.
 fn smoothPoints(alloc: std.mem.Allocator, raw: []const Point) ![]Point {
     if (raw.len < 3) return alloc.dupe(Point, raw);
 
-    const MAX_SUBDIV = 8;
-    const UNITS_PER_STEP = 3.0;
-    const MAX_TOTAL_POINTS = 4000;
+    const MAX_SUBDIV = 24;
+    const UNITS_PER_STEP = 1.0;
+    const MAX_TOTAL_POINTS = 12000;
 
     var out = std.array_list.Managed(Point).init(alloc);
     errdefer out.deinit();

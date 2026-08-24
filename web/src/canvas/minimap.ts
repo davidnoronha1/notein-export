@@ -3,6 +3,10 @@ import type { NoteLayout } from "./layout";
 import type { Viewport } from "./viewport";
 
 const THUMB_WIDTH = 96;
+// Below the thumbnail's tiny scale, most stroke widths round to a fraction of
+// a device pixel and vanish; floor every stroke/shape to this many device
+// pixels wide so the minimap still reads as legible ink instead of blank.
+const THUMB_MIN_STROKE_PX = 1.25;
 
 function argbToCss(argb: number): string {
   const a = ((argb >>> 24) & 0xff) / 255;
@@ -94,7 +98,18 @@ export class Minimap {
     // Steals wasm's active decode window momentarily to rasterize this page
     // at thumbnail resolution; the caller resyncs the real window afterward.
     this.wasm.setActiveWindow([page.index]);
-    const rgba = this.wasm.renderViewport(page.index, 0, 0, page.width, page.height, THUMB_WIDTH, thumbHeight);
+    const rgba = this.wasm.renderViewport(
+      page.index,
+      0,
+      0,
+      page.width,
+      page.height,
+      THUMB_WIDTH,
+      thumbHeight,
+      -Infinity,
+      Infinity,
+      THUMB_MIN_STROKE_PX,
+    );
 
     this.scratchCanvas.width = THUMB_WIDTH;
     this.scratchCanvas.height = thumbHeight;

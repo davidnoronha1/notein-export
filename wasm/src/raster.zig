@@ -271,59 +271,78 @@ pub fn tessellateStroke(points: []const window.Point, base_width: f32, out: [][2
 
 var scratch_poly: [8192][2]f32 = undefined;
 
-/// Rasterizes decoded strokes and shapes for one page's content into `canvas`,
-/// in `content.order` (chronological/stacking) order rather than always
-/// drawing every stroke before every shape -- otherwise a shape drawn before
-/// some ink would incorrectly always render on top of it, and vice versa.
-/// This is the hot path: called once per visible page per frame.
-pub fn renderPageContent(canvas: Canvas, content: window.PageContent) void {
-    for (content.order) |ref| {
-        switch (ref.kind) {
-            .stroke => drawStroke(canvas, content.strokes[ref.index]),
-            .shape => drawShape(canvas, content.shapes[ref.index]),
-        }
-    }
+/// Same as `tessellateStroke`, but writes into the module's reusable scratch
+/// buffer -- for callers (e.g. vector/SVG export) that just need "the
+/// tessellated polygon for this one stroke" without owning their own buffer.
+/// Empty if the stroke has more points than the scratch buffer can hold.
+pub fn tessellateStrokeScratch(points: []const window.Point, base_width: f32) [][2]f32 {
+    if (points.len * 2 > scratch_poly.len) return &[_][2]f32{};
+    return tessellateStroke(points, base_width, &scratch_poly);
 }
 
-fn drawStroke(canvas: Canvas, s: window.DecodedStroke) void {
-    if (s.points.len < 2) return;
-    const poly = if (s.points.len * 2 <= scratch_poly.len)
-        tessellateStroke(s.points, s.width, &scratch_poly)
-    else
-        &[_][2]f32{};
-    if (poly.len >= 3) canvas.fillPolygon(poly, s.color);
-}
-
-fn drawShape(canvas: Canvas, s: window.DecodedShape) void {
-    // Notein's shape tool (rectangle/line/etc.) is stroke-only, like a
-    // ruler-guided pen stroke -- there's no fill color/flag anywhere in
-    // ShapeEntity's columns or its points JSON, so every shape (closed
-    // polygon or open line) is drawn as an outline of `width`, never filled.
-    if (s.points.len >= 3) {
-        var i: usize = 0;
-        while (i < s.points.len) : (i += 1) {
-            drawLine(canvas, s.points[i], s.points[(i + 1) % s.points.len], s.width, s.color);
-        }
-    } else if (s.points.len == 2) {
-        drawLine(canvas, s.points[0], s.points[1], s.width, s.color);
-    }
-}
-
-fn drawLine(canvas: Canvas, a: [2]f32, b: [2]f32, width: f32, argb: u32) void {
+/// Builds the width-`width` quad outline of a single line segment `a` -> `b`
+/// (used for shape-tool edges, which are drawn as ruler-guided strokes, not
+/// filled polygons). Degenerate (zero-length) segments collapse to a
+/// zero-area quad, which `fillPolygon` already no-ops on.
+pub fn quadForLine(a: [2]f32, b: [2]f32, width: f32) [4][2]f32 {
     var dx = b[0] - a[0];
     var dy = b[1] - a[1];
     const len = @sqrt(dx * dx + dy * dy);
-    if (len < 0.0001) return;
+    if (len < 0.0001) return .{ a, a, a, a };
     dx /= len;
     dy /= len;
     const nx = -dy * @max(0.4, width) * 0.5;
     const ny = dx * @max(0.4, width) * 0.5;
-    const quad = [_][2]f32{
+    return .{
         .{ a[0] + nx, a[1] + ny },
         .{ b[0] + nx, b[1] + ny },
         .{ b[0] - nx, b[1] - ny },
         .{ a[0] - nx, a[1] - ny },
     };
+}
+
+/// Rasterizes decoded strokes and shapes for one page's content into `canvas`,
+/// in `content.order` (chronological/stacking) order rather than always
+/// drawing every stroke before every shape -- otherwise a shape drawn before
+/// some ink would incorrectly always render on top of it, and vice versa.
+/// This is the hot path: called once per visible page per frame.
+pub fn renderPageContent(canvas: Canvas, content: window.PageContent, min_width_world: f32) void {
+    for (content.order) |ref| {
+        switch (ref.kind) {
+            .stroke => drawStroke(canvas, content.strokes[ref.index], min_width_world),
+            .shape => drawShape(canvas, content.shapes[ref.index], min_width_world),
+        }
+    }
+}
+
+fn drawStroke(canvas: Canvas, s: window.DecodedStroke, min_width_world: f32) void {
+    if (s.points.len < 2) return;
+    const width = @max(s.width, min_width_world);
+    const poly = if (s.points.len * 2 <= scratch_poly.len)
+        tessellateStroke(s.points, width, &scratch_poly)
+    else
+        &[_][2]f32{};
+    if (poly.len >= 3) canvas.fillPolygon(poly, s.color);
+}
+
+fn drawShape(canvas: Canvas, s: window.DecodedShape, min_width_world: f32) void {
+    // Notein's shape tool (rectangle/line/etc.) is stroke-only, like a
+    // ruler-guided pen stroke -- there's no fill color/flag anywhere in
+    // ShapeEntity's columns or its points JSON, so every shape (closed
+    // polygon or open line) is drawn as an outline of `width`, never filled.
+    const width = @max(s.width, min_width_world);
+    if (s.points.len >= 3) {
+        var i: usize = 0;
+        while (i < s.points.len) : (i += 1) {
+            drawLine(canvas, s.points[i], s.points[(i + 1) % s.points.len], width, s.color);
+        }
+    } else if (s.points.len == 2) {
+        drawLine(canvas, s.points[0], s.points[1], width, s.color);
+    }
+}
+
+fn drawLine(canvas: Canvas, a: [2]f32, b: [2]f32, width: f32, argb: u32) void {
+    const quad = quadForLine(a, b, width);
     canvas.fillPolygon(&quad, argb);
 }
 
@@ -339,7 +358,7 @@ test "tessellateStroke produces a closed outline with 2x point count" {
 }
 
 test "renderPageContent fills a simple stroke into the canvas buffer" {
-    var pixels = [_]u8{0} ** (16 * 16 * 4);
+    var pixels: [16 * 16 * 4]u8 = @splat(0);
     const canvas = Canvas{ .pixels = &pixels, .width = 16, .height = 16, .origin_x = 0, .origin_y = 0, .scale = 1 };
     canvas.clear(0x00000000);
 
@@ -353,7 +372,7 @@ test "renderPageContent fills a simple stroke into the canvas buffer" {
         .text_boxes = &.{},
         .order = &[_]window.DrawRef{.{ .kind = .stroke, .index = 0 }},
     };
-    renderPageContent(canvas, content);
+    renderPageContent(canvas, content, 0);
 
     // Center of the stroke should now be opaque red.
     const idx = (8 * 16 + 8) * 4;

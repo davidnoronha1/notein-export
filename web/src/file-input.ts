@@ -1,6 +1,6 @@
 /** Wires drag-and-drop and a plain <input type="file"> onto the drop zone,
  * both converging on the same callback with the chosen File. */
-export function setupFileInput(onFile: (file: File) => void): void {
+export function setupFileInput(onFile: (file: File) => void | Promise<void>): void {
   const dropZone = document.getElementById("drop-zone")!;
   const openButton = document.getElementById("open-button")!;
   const fileInput = document.getElementById("file-input") as HTMLInputElement;
@@ -9,7 +9,9 @@ export function setupFileInput(onFile: (file: File) => void): void {
 
   fileInput.addEventListener("change", () => {
     const file = fileInput.files?.[0];
-    if (file) onFile(file);
+    // Reset immediately so the same file can be re-selected after a failure.
+    fileInput.value = "";
+    if (file) void onFile(file);
   });
 
   dropZone.addEventListener("dragover", (e) => {
@@ -23,7 +25,7 @@ export function setupFileInput(onFile: (file: File) => void): void {
     e.preventDefault();
     dropZone.classList.remove("drag-over");
     const file = e.dataTransfer?.files?.[0];
-    if (file) onFile(file);
+    if (file) void onFile(file);
   });
 }
 

@@ -12,7 +12,13 @@ fn countRow(ctx: *CountCtx, row: btree.Row) !void {
 }
 
 fn openDiary(alloc: std.mem.Allocator) !struct { file_bytes: []u8, archive: zip.Archive, db_bytes: []u8, db: pager.Db } {
-    const file_bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "../fixtures/diary.in", alloc, .limited(300 * 1024 * 1024));
+    const file_bytes = std.Io.Dir.cwd().readFileAlloc(std.testing.io, "../fixtures/diary.in", alloc, .limited(300 * 1024 * 1024)) catch |err| {
+        if (err == error.FileNotFound) {
+            std.debug.print("skip: fixtures/diary.in not found -- integration test requires a local .in sample (ignored by git), skipping\n", .{});
+            return error.SkipZigTest;
+        }
+        return err;
+    };
 
     const entries_buf = try alloc.alloc(zip.Entry, 64);
     const archive = try zip.open(alloc, file_bytes, entries_buf);

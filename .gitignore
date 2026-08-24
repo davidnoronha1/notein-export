@@ -2,6 +2,7 @@ node_modules/
 dist/
 .zig-cache/
 zig-out/
+.wrangler/
 web/src/wasm/*.wasm
 *.in
-fixtures/
+fixtures/*.in
