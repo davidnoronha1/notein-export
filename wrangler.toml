@@ -1,0 +1,6 @@
+name = "noteinexport"
+compatibility_date = "2025-08-24"
+
+[assets]
+directory = "./web/dist"
+not_found_handling = "single-page-application"
