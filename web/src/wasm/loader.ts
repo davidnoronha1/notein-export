@@ -30,6 +30,12 @@ interface NoteinExports {
   get_visible_textbox_ptr(): number;
   get_bytes(namePtr: number, nameLen: number): number;
   get_bytes_len(): number;
+  get_all_images_count(): number;
+  get_all_images_ptr(): number;
+  get_all_links_count(): number;
+  get_all_links_ptr(): number;
+  get_all_audio_count(): number;
+  get_all_audio_ptr(): number;
   get_vector_content_count(pageIndex: number, x: number, y: number, w: number, h: number, timeMin: number, timeMax: number): number;
   get_vector_content_poly_ptr(): number;
   get_vector_content_vertex_ptr(): number;
@@ -66,6 +72,37 @@ const PAGE_INFO_STRIDE = 16; // f32 width, f32 height, u32 unbounded, u32 color
 const IMAGE_DRAW_STRIDE = 32; // 4x f32 bounds, u32 name_ptr, u32 name_len, f64 creation_time
 const TEXTBOX_DRAW_STRIDE = 40; // 4x f32 bounds, f32 size, u32 color, u32 text_ptr, u32 text_len, f64 creation_time
 const VECTOR_POLY_STRIDE = 24; // f64 creation_time, u32 color, u32 vertex_offset, u32 vertex_count
+const ASSET_IMAGE_STRIDE = 40; // f64 creation_time, 4x f32 bounds, u32 page_index, u32 name_ptr, u32 name_len
+const LINK_DRAW_STRIDE = 40; // f64 creation_time, 4x f32 bounds, u32 page_index, i32 link_type, u32 dest_ptr, u32 dest_len
+const AUDIO_DRAW_STRIDE = 32; // f64 creation_time, f64 duration_ms, u32 name_ptr, u32 name_len, u32 entry_ptr, u32 entry_len
+
+export interface AssetImage {
+  pageIndex: number;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  name: string;
+  creationTime: number;
+}
+
+export interface LinkAsset {
+  pageIndex: number;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  destination: string;
+  linkType: number;
+  creationTime: number;
+}
+
+export interface AudioAsset {
+  name: string;
+  entryName: string;
+  durationMs: number;
+  creationTime: number;
+}
 
 export interface VectorPoly {
   color: number; // packed ARGB
@@ -251,5 +288,74 @@ export class NoteinModule {
     const dataLen = this.exports.get_bytes_len();
     // Copy out immediately: the returned buffer is reused on the next call.
     return new Uint8Array(this.memory, dataPtr, dataLen).slice();
+  }
+
+  /** All images in the note (not viewport-culled), for the Media panel. */
+  getAllImages(): AssetImage[] {
+    const count = this.exports.get_all_images_count();
+    const ptr = this.exports.get_all_images_ptr();
+    const view = new DataView(this.memory, ptr, count * ASSET_IMAGE_STRIDE);
+    const out: AssetImage[] = [];
+    for (let i = 0; i < count; i++) {
+      const base = i * ASSET_IMAGE_STRIDE;
+      const namePtr = view.getUint32(base + 28, true);
+      const nameLen = view.getUint32(base + 32, true);
+      out.push({
+        creationTime: view.getFloat64(base + 0, true),
+        left: view.getFloat32(base + 8, true),
+        top: view.getFloat32(base + 12, true),
+        right: view.getFloat32(base + 16, true),
+        bottom: view.getFloat32(base + 20, true),
+        pageIndex: view.getUint32(base + 24, true),
+        name: this.readString(namePtr, nameLen),
+      });
+    }
+    return out;
+  }
+
+  /** All hyperlinks in the note, for the Links panel. */
+  getAllLinks(): LinkAsset[] {
+    const count = this.exports.get_all_links_count();
+    const ptr = this.exports.get_all_links_ptr();
+    const view = new DataView(this.memory, ptr, count * LINK_DRAW_STRIDE);
+    const out: LinkAsset[] = [];
+    for (let i = 0; i < count; i++) {
+      const base = i * LINK_DRAW_STRIDE;
+      const destPtr = view.getUint32(base + 32, true);
+      const destLen = view.getUint32(base + 36, true);
+      out.push({
+        creationTime: view.getFloat64(base + 0, true),
+        left: view.getFloat32(base + 8, true),
+        top: view.getFloat32(base + 12, true),
+        right: view.getFloat32(base + 16, true),
+        bottom: view.getFloat32(base + 20, true),
+        pageIndex: view.getUint32(base + 24, true),
+        linkType: view.getInt32(base + 28, true),
+        destination: this.readString(destPtr, destLen),
+      });
+    }
+    return out;
+  }
+
+  /** All audio recordings in the note, for the Media panel's Audio tab. */
+  getAllAudio(): AudioAsset[] {
+    const count = this.exports.get_all_audio_count();
+    const ptr = this.exports.get_all_audio_ptr();
+    const view = new DataView(this.memory, ptr, count * AUDIO_DRAW_STRIDE);
+    const out: AudioAsset[] = [];
+    for (let i = 0; i < count; i++) {
+      const base = i * AUDIO_DRAW_STRIDE;
+      const namePtr = view.getUint32(base + 16, true);
+      const nameLen = view.getUint32(base + 20, true);
+      const entryPtr = view.getUint32(base + 24, true);
+      const entryLen = view.getUint32(base + 28, true);
+      out.push({
+        creationTime: view.getFloat64(base + 0, true),
+        durationMs: view.getFloat64(base + 8, true),
+        name: this.readString(namePtr, nameLen),
+        entryName: this.readString(entryPtr, entryLen),
+      });
+    }
+    return out;
   }
 }
