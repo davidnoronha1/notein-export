@@ -91,7 +91,6 @@ pub const Canvas = struct {
     fn fillPolygon(self: Canvas, poly: []const [2]f32, argb: u32) void {
         if (poly.len < 3) return;
 
-        // SIMD: 2-wide vector for x/y min/max across poly
         const Vec2 = @Vector(2, f32);
         var mins: Vec2 = .{ poly[0][0], poly[0][1] };
         var maxs: Vec2 = mins;

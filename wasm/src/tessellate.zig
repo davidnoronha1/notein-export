@@ -16,7 +16,6 @@ pub fn tessellateStroke(points: []const model.Point, base_width: f32, out: [][2]
         const p = points[i];
         const prev = points[if (i == 0) 0 else i - 1];
         const next = points[if (i + 1 < points.len) i + 1 else i];
-        // SIMD: diff as 2-lane vector, length via dot product
         var diff: Vec2 = .{ next.x - prev.x, next.y - prev.y };
         const len = @sqrt(@reduce(.Add, diff * diff));
         if (len > 0.0001) {
@@ -24,7 +23,6 @@ pub fn tessellateStroke(points: []const model.Point, base_width: f32, out: [][2]
         } else {
             diff = @splat(0);
         }
-        // Normal (perpendicular) direction: (-dy, dx)
         const normal: Vec2 = .{ -diff[1], diff[0] };
         const radius = @max(0.4, base_width * @max(0.15, p.p)) * 0.5;
         const p_vec: Vec2 = .{ p.x, p.y };
@@ -63,7 +61,6 @@ pub fn quadForLine(a: [2]f32, b: [2]f32, width: f32) [4][2]f32 {
     if (len < 0.0001) return .{ a, a, a, a };
     diff /= @as(Vec2, @splat(len));
     const radius = @max(0.4, width) * 0.5;
-    // normal * radius: (-dy, dx) * radius
     const offset: Vec2 = .{ -diff[1] * radius, diff[0] * radius };
     const a_left: Vec2 = av + offset;
     const b_left: Vec2 = bv + offset;

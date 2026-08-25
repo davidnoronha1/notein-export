@@ -111,7 +111,6 @@ pub const Error = error{
 
 const MAX_ZIP_ENTRIES = 512;
 
-const readColumn = util.readColumn;
 const readColumnF32 = util.readColumnF32;
 const readColumnBool = util.readColumnBool;
 const readColumnI64 = util.readColumnI64;
@@ -122,7 +121,6 @@ const argbFromSigned = util.argbFromSigned;
 // include them. Bounded pages have a fixed paper_spec so their coordinate
 // space is already known; only infinite-canvas pages need this tracked extent
 // to tell the frontend where ink actually lives.
-// SIMD: 4-wide vector [left, top, right, bottom]; left/top take min, right/bottom take max.
 fn readBoundsTracked(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, left_col: usize, pages: []Page, page_index: u32) Bounds {
     const b = Bounds{
         .left   = readColumnF32(db, row, hdr, left_col),
@@ -202,8 +200,6 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
         // pointer) so must NOT be freed separately here.
         scratch_base.free(wal_bytes);
     } else {
-        // No WAL to merge: extract straight into scratch_base (see doc
-        // comment above for why db_bytes lives there, not `alloc`).
         db_bytes = try archive.extract(scratch_base, db_entry);
     }
     const db = try pager.Db.init(db_bytes);
@@ -225,15 +221,15 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
     var note_ctx = NoteCtx{ .alloc = alloc, .db = db, .uuid = note_uuid };
     const visitNote = struct {
         fn f(ctx: *NoteCtx, row: btree.Row) !void {
-            if (ctx.page_list_json != null) return; // already found
+            if (ctx.page_list_json != null) return;
             const hdr = try row.header();
             // NoteContentEntity: id, page_list, page_layer_list, outline_list,
             // default_page_id, pdf_info_id, saved_page_index,
             // activated_page_layer_id, zoom, unbounded_page_offset_x,
             // unbounded_page_offset_y, unbounded_note, ...
-            const id = try readColumn(ctx.alloc, ctx.db, row, hdr, 0);
+            const id = try row.readColumnAlloc(ctx.alloc, ctx.db, hdr, 0);
             if (!std.mem.eql(u8, id, ctx.uuid)) return;
-            ctx.page_list_json = try readColumn(ctx.alloc, ctx.db, row, hdr, 1);
+            ctx.page_list_json = try row.readColumnAlloc(ctx.alloc, ctx.db, hdr, 1);
             ctx.unbounded = readColumnBool(ctx.db, row, hdr, 11);
         }
     }.f;
@@ -254,8 +250,8 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
             // PageEntity: id, note_id, paper_spec, page_orientation, paper_theme,
             // padding_color, paper_padding, creation_time, last_modification_time,
             // tn_path, unbounded, ...
-            const id = try readColumn(ctx.alloc, ctx.db, row, hdr, 0);
-            const paper_spec_json = try readColumn(ctx.alloc, ctx.db, row, hdr, 2);
+            const id = try row.readColumnAlloc(ctx.alloc, ctx.db, hdr, 0);
+            const paper_spec_json = try row.readColumnAlloc(ctx.alloc, ctx.db, hdr, 2);
             var width: f32 = 0;
             var height: f32 = 0;
             if (paper_spec_json.len > 0) {
@@ -272,7 +268,7 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
             // (ColorPaperTheme, PatternPaperTheme, ImagePaperTheme, ...);
             // only ColorPaperTheme carries a flat baseTheme.color, so fall
             // back to opaque white when it's absent (e.g. image/pattern themes).
-            const paper_theme_json = try readColumn(ctx.alloc, ctx.db, row, hdr, 4);
+            const paper_theme_json = try row.readColumnAlloc(ctx.alloc, ctx.db, hdr, 4);
             var background_color: u32 = 0xFFFFFFFF;
             if (paper_theme_json.len > 0) {
                 if (json.parseTyped(json.PaperThemeJson, ctx.alloc, paper_theme_json)) |theme| {
@@ -289,13 +285,11 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
         pages[i] = page_map.get(pid) orelse .{ .id = pid, .unbounded = note_ctx.unbounded, .width = 0, .height = 0, .background_color = 0xFFFFFFFF };
     }
 
-    // Build O(1) page-id -> index map to avoid O(P) linear scan per row
-    // (previously each scan did `for(pages) if(eql)`) — shared by all scans
-    // below, so we pay the hash-map build once instead of per-row.
+    // O(1) page-id -> index map, shared by all scans below so the lookup
+    // isn't a linear scan over pages per row.
     var page_index_map = std.StringHashMap(u32).init(alloc);
     for (pages, 0..) |p, i| try page_index_map.put(p.id, @intCast(i));
 
-    // Scan all six tables and expand per-page content_bounds in one call.
     const assets = try iterateAllAssets(alloc, db, archive, pages, &page_index_map);
 
     return .{
@@ -359,7 +353,7 @@ fn scanIndexedTable(
     const visit = struct {
         fn f(c: *Ctx, row: btree.Row) !void {
             const hdr = try row.header();
-            const page_id = try readColumn(c.alloc, c.db, row, hdr, c.page_id_col);
+            const page_id = try row.readColumnAlloc(c.alloc, c.db, hdr, c.page_id_col);
             const page_index = c.map.get(page_id) orelse return; // orphaned row
             const bounds = readBoundsTracked(c.db, row, hdr, c.bounds_col, c.pages, page_index);
             try c.out.append(.{ .page_index = page_index, .bounds = bounds, .row = row, .extra = .{} });
@@ -369,10 +363,8 @@ fn scanIndexedTable(
     return ctx.out.toOwnedSlice();
 }
 
-// Scans all six asset tables and expands per-page content_bounds -- one call
-// covers what used to be two separate steps (scanAllAssets + expand loops).
-// Still 6 B-tree walks (unavoidable, separate B-trees); audio has no bounds
-// and is excluded from the content_bounds pass.
+// 6 separate B-tree walks (unavoidable, separate B-trees); audio has no
+// bounds and is excluded from the content_bounds pass.
 const AllAssets = struct {
     strokes: []StrokeEntry,
     shapes: []ShapeEntry,
@@ -441,8 +433,8 @@ fn scanAssetTable(
 // creation_time, last_modification_time, left, top, right, bottom, fixed
 fn decodeImage(ctx: ImageCtx, alloc: std.mem.Allocator, db: pager.Db, row: btree.Row) !?ImageAsset {
     const hdr = try row.header();
-    const uri = try readColumn(alloc, db, row, hdr, 1);
-    const page_id = try readColumn(alloc, db, row, hdr, 6);
+    const uri = try row.readColumnAlloc(alloc, db, hdr, 1);
+    const page_id = try row.readColumnAlloc(alloc, db, hdr, 6);
     const page_index = ctx.map.get(page_id) orelse return null;
     // `id` does not reliably match the zip asset's uuid; the zip entry
     // name is derived from `uri`'s basename instead (see plan findings).
@@ -461,12 +453,12 @@ fn decodeImage(ctx: ImageCtx, alloc: std.mem.Allocator, db: pager.Db, row: btree
 // extras(json, unused), creation_time, last_modification_time, left, top, right, bottom
 fn decodeLink(ctx: LinkCtx, alloc: std.mem.Allocator, db: pager.Db, row: btree.Row) !?LinkAsset {
     const hdr = try row.header();
-    const page_id = try readColumn(alloc, db, row, hdr, 2);
+    const page_id = try row.readColumnAlloc(alloc, db, hdr, 2);
     const page_index = ctx.map.get(page_id) orelse return null; // orphaned row
     return .{
         .page_index = page_index,
         .bounds = readBoundsTracked(db, row, hdr, 8, ctx.pages, page_index),
-        .destination = try readColumn(alloc, db, row, hdr, 4),
+        .destination = try row.readColumnAlloc(alloc, db, hdr, 4),
         .link_type = readColumnI64(db, row, hdr, 3),
         .creation_time = readColumnI64(db, row, hdr, 6),
     };
@@ -476,8 +468,8 @@ fn decodeLink(ctx: LinkCtx, alloc: std.mem.Allocator, db: pager.Db, row: btree.R
 // Zip entry name is derived from file_path's basename, same pattern as ImageEntity.uri.
 fn decodeAudio(ctx: AudioCtx, alloc: std.mem.Allocator, db: pager.Db, row: btree.Row) !?AudioAsset {
     const hdr = try row.header();
-    const file_path = try readColumn(alloc, db, row, hdr, 1);
-    const audio_name = try readColumn(alloc, db, row, hdr, 2);
+    const file_path = try row.readColumnAlloc(alloc, db, hdr, 1);
+    const audio_name = try row.readColumnAlloc(alloc, db, hdr, 2);
     const basename = if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |i| file_path[i + 1 ..] else file_path;
     const entry_name = try std.fmt.allocPrint(alloc, "note_audio_{s}", .{basename});
     if (ctx.archive.find(entry_name) == null) return null; // asset missing from export, skip gracefully

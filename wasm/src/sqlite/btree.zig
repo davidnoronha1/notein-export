@@ -50,9 +50,10 @@ pub const Row = struct {
 pub const Error = error{ InvalidPage, TooManyColumns } || pager.Error;
 
 /// Calls `visit(ctx, row)` for every row in the table b-tree rooted at `root_page`,
-/// in leaf traversal (rowid ascending) order. Non-recursive-allocating: uses an
-/// explicit stack sized for realistic tree depths (SQLite b-trees are extremely
-/// shallow even at millions of rows).
+/// in leaf traversal (rowid ascending) order. Walks via real recursion: b-tree
+/// *depth* is tiny (a handful of levels even at millions of rows) even when a
+/// page's *fanout* (cell count) is large, so this can't stack-overflow the way
+/// an artificially depth-limited explicit stack sized for fanout could.
 pub fn scanTable(
     db: pager.Db,
     root_page: u32,
@@ -60,10 +61,6 @@ pub fn scanTable(
     ctx: Ctx,
     comptime visit: fn (Ctx, Row) anyerror!void,
 ) !void {
-    // Real recursion: b-tree *depth* is tiny (a handful of levels even at
-    // millions of rows) even when a page's *fanout* (cell count) is large,
-    // so this can't stack-overflow the way an artificially depth-limited
-    // explicit stack sized for fanout could.
     try walkPage(db, root_page, Ctx, ctx, visit);
 }
 

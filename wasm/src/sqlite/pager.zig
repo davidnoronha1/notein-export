@@ -68,7 +68,6 @@ pub fn readPayloadRange(
 ) void {
     var filled: usize = 0;
 
-    // Local portion.
     if (offset < local.len) {
         const src_start = offset;
         const n = @min(out.len, local.len - src_start);

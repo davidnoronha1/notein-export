@@ -9,17 +9,21 @@ pub inline fn argbFromSigned(v: i64) u32 {
 }
 
 // --- SQLite column helpers (tiny, pure, reused across model/window) ---
-pub inline fn readColumn(alloc: std.mem.Allocator, db: pager.Db, row: btree.Row, hdr: record.RecordHeader, i: usize) ![]const u8 {
-    return row.readColumnAlloc(alloc, db, hdr, i);
+/// Only serial types 1-7 (ints/real, <=8 bytes) decode to `.int`/`.real`; any
+/// other type (NULL, TEXT, BLOB) is irrelevant to these numeric readers and,
+/// crucially, can report an arbitrarily large `range.len` that must never
+/// reach the fixed 8-byte stack buffer below.
+fn readNumericColumn(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, i: usize) record.Value {
+    if (i >= hdr.column_count) return .null;
+    const range = hdr.columnRange(i);
+    if (range.len > 8) return .null;
+    var buf: [8]u8 = undefined;
+    row.readColumn(db, hdr, i, buf[0..range.len]);
+    return record.decodeValue(hdr.serialType(i), buf[0..range.len]);
 }
 
 pub inline fn readColumnF32(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, i: usize) f32 {
-    if (i >= hdr.column_count) return 0;
-    const range = hdr.columnRange(i);
-    var buf: [8]u8 = undefined;
-    row.readColumn(db, hdr, i, buf[0..range.len]);
-    const v = record.decodeValue(hdr.serialType(i), buf[0..range.len]);
-    return switch (v) {
+    return switch (readNumericColumn(db, row, hdr, i)) {
         .real => |r| @floatCast(r),
         .int => |n| @floatFromInt(n),
         else => 0,
@@ -27,23 +31,14 @@ pub inline fn readColumnF32(db: pager.Db, row: btree.Row, hdr: record.RecordHead
 }
 
 pub inline fn readColumnBool(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, i: usize) bool {
-    if (i >= hdr.column_count) return false;
-    const range = hdr.columnRange(i);
-    var buf: [8]u8 = undefined;
-    row.readColumn(db, hdr, i, buf[0..range.len]);
-    const v = record.decodeValue(hdr.serialType(i), buf[0..range.len]);
-    return switch (v) {
+    return switch (readNumericColumn(db, row, hdr, i)) {
         .int => |n| n != 0,
         else => false,
     };
 }
 
 pub inline fn readColumnI64(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, i: usize) i64 {
-    if (i >= hdr.column_count) return 0;
-    const range = hdr.columnRange(i);
-    var buf: [8]u8 = undefined;
-    row.readColumn(db, hdr, i, buf[0..range.len]);
-    const v = record.decodeValue(hdr.serialType(i), buf[0..range.len]);
+    const v = readNumericColumn(db, row, hdr, i);
     return if (v == .int) v.int else 0;
 }
 

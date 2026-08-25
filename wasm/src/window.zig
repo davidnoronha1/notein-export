@@ -152,7 +152,6 @@ fn smoothPoints(alloc: std.mem.Allocator, raw: []const Point) ![]Point {
         // iterations than scalar. Native x86_64 with AVX2 does 8-wide in one go.
         const Vec8 = @Vector(8, f32);
         var s: usize = 1;
-        // Batch 8
         while (s + 7 <= steps) : (s += 8) {
             var t_vec: Vec8 = undefined;
             inline for (0..8) |k| {
@@ -174,7 +173,6 @@ fn smoothPoints(alloc: std.mem.Allocator, raw: []const Point) ![]Point {
 }
 
 fn catmullRom(p0: Point, p1: Point, p2: Point, p3: Point, t: f32) Point {
-    // SIMD: compute x,y,p lanes together as Vec3
     const Vec3 = @Vector(3, f32);
     const p0v: Vec3 = .{ p0.x, p0.y, p0.p };
     const p1v: Vec3 = .{ p1.x, p1.y, p1.p };
@@ -434,8 +432,7 @@ pub const Window = struct {
             }
         }.lessThan);
 
-        const is_unbounded = if (page_index < self.note.pages.len) self.note.pages[page_index].unbounded else false;
-        const grid = if (is_unbounded and order.len >= 32) try buildGrid(self.alloc, order, strokes_slice, shapes_slice) else Grid{};
+        const grid = if (order.len >= 32) try buildGrid(self.alloc, order, strokes_slice, shapes_slice) else Grid{};
         const seen = if (grid.cols > 0) try self.alloc.alloc(u32, order.len) else @as([]u32, &.{});
         if (grid.cols > 0) @memset(seen, 0);
 
