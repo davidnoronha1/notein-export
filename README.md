@@ -1,36 +1,22 @@
 # notein-export
 
+![Screenshot](assets/screenshot.png)
+
 Browser-based viewer and exporter for **Notein** (`.in`) handwriting notes. Drop a `.in` file in and view, pan, and export — everything runs locally in your browser.
 
-Unpacks the `.in` format (ZIP + SQLite) with a small Zig/WASM core, renders pressure-aware vector ink on `<canvas>`, and exports any region or page to **PNG / PDF / SVG** at 1× / 2× / 4×.
-
-![Screenshot](assets/screenshot.png)
+Unpacks the `.in` format (ZIP + SQLite) with a small Zig/WASM core, renders pressure-aware vector ink on `<canvas>`, and exports any region or page to **PNG / PDF / SVG**.
 
 ## Features
 
 - **Drag & drop** `.in` file → instant local render, no upload
-- **Infinite canvas + bounded pages** (A4 / Letter) — pan, zoom, and minimap with viewport indicator
-- **Pressure-aware strokes** replayed as variable-width polygons, not bitmaps
-- **Images, typed text, and shapes** composited in chronological order
-- **Export** — select a region or export the whole page to PNG, PDF (`pdf-lib`), or true vector SVG. Selection menu follows your selection with a progress indicator for large exports
-- **Media panel** — browse all embedded images and audio, jump to an image's location, play/download audio, or download everything as a single ZIP (ZIP assembly is done in Zig with real local/central headers and CRC32, no JS zip library)
-- **Links panel** — browse all hyperlinks, jump to their position, or open externally
+- **Infinite canvas + bounded pages** — pan, zoom, and minimap
+- **Pressure-aware strokes** as vector polygons, composited with images, text, and shapes in chronological order
+- **Export** — select a region or export the whole page to PNG, PDF, or SVG
+- **Media & Links** — browse images, audio, and hyperlinks, jump to their location, preview or download individually, or grab all media as a single ZIP
 
 ## File format
 
-`.in` is a ZIP archive:
-
-| File | Purpose |
-|---|---|
-| `note_database_note_<uuid>_db` | SQLite DB — all note content |
-| `…_db-wal`, `…_db-shm` | WAL/journal (applied on load) |
-| `note_meta.json` | Title, timestamps, folder, flags |
-| `note_extra.json`, `note_in_flag.json`, `note_label.json`, `notepdf_lost_info.json` | Metadata / flags / labels |
-| `note_image_<uuid>.*`, `note_audio_<uuid>.*` | Embedded images/audio, referenced by name from the DB |
-
-Key tables: `NoteContentEntity`, `PageEntity`, `StrokeEntity` (`record_json` → `points: {x,y,p,action}[]`), `TextBoxEntity`, `ImageEntity`, `ShapeEntity`, `HyperLinkEntity`, `AudioFileEntity`, plus layers and outlines.
-
-See [`FORMAT.md`](FORMAT.md) for the full reverse-engineering notes. To read programmatically: unzip → replay WAL → open `…_db` with any SQLite library → read `StrokeEntity.record_json` → replay points.
+See [`FORMAT.md`](FORMAT.md) for the full reverse-engineered `.in` spec.
 
 ## Getting started
 
@@ -103,16 +89,17 @@ notein-export/
 
 ## How it works
 
+```mermaid
+flowchart LR
+    A[Drop .in file] --> B[Read bytes into WASM]
+    B --> C[Unzip + WAL replay]
+    C --> D[Parse SQLite → index]
+    D --> E[Build world layout]
+    E --> F[Active window — decode visible pages]
+    F --> G[Tessellate — pressure → polygons]
+    G --> H[Rasterize + composite]
+    H --> I[Display on canvas]
 ```
-drop .in → read bytes → unzip + WAL replay → SQLite → layout → active window → tessellate → raster → canvas
-```
-
-1. **Read file** — the `.in` is read as raw bytes in JS and copied into WASM memory via `alloc_big` / `open` (`wasm/src/main.zig:114`).
-2. **Unzip + WAL replay** — `zip.zig` opens the archive, `wal.zig` replays `…_db-wal` onto `…_db` to get the final SQLite image.
-3. **Parse SQLite** — `sqlite/btree.zig` + `model.zig:open` scan `NoteContentEntity` / `PageEntity` / `StrokeEntity` etc. into a lightweight index (bounds + page + row pointer). `record_json` stays undecoded.
-4. **Layout** — `web/src/canvas/layout.ts:46` builds one world space: bounded pages stack vertically and center horizontally; unbounded pages are sized to their real `content_bounds` (union of all item bounds from `model.zig:338`), not the nominal `paper_spec`.
-5. **Active window** — `window.zig:Window.setActive` decodes only the visible pages (+1 prefetch). Each stroke is smoothed (Catmull-Rom), tessellated once into a pressure-aware ribbon polygon (`tessellate.zig:9`), and indexed in a spatial grid for fast culling.
-6. **Render** — for each visible page, `renderer.ts:144` intersects the world viewport with the page box, converts to page-local, culls via the grid, rasterizes polygons with `raster.zig:71` (scanline, nonzero winding, AA), and composites ink / images / text in `creationTime` order onto the HiDPI canvas. Export reuses the same path offscreen.
 
 ## Privacy
 
@@ -122,4 +109,3 @@ drop .in → read bytes → unzip + WAL replay → SQLite → layout → active 
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
