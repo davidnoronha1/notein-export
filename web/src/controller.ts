@@ -62,6 +62,10 @@ export class AppController {
    * perpetually greyed out. A mixed note still shows them, toggling
    * pageExportEnabled live as the current page changes. */
   readonly notePageExportPossible = signal(false);
+  /** Mirrors Minimap's own freeform-vs-paginated decision (any unbounded
+   * page -> freeform) so App.tsx can style the minimap container to match
+   * what Minimap actually renders inside it -- see index.html's #minimap.free. */
+  readonly minimapFreeform = signal(false);
 
   readonly dropZoneVisible = signal(true);
   readonly dropZoneLoading = signal(false);
@@ -318,6 +322,7 @@ export class AppController {
       this.minimap.updateIndicator();
       this.noteLoaded.value = true;
       this.notePageExportPossible.value = this.renderer.layout.pages.some((p) => !p.unbounded);
+      this.minimapFreeform.value = this.renderer.layout.pages.some((p) => p.unbounded);
       this.syncZoomUI();
       this.syncPageExportUI();
       this.noteVersion.value++;
@@ -333,6 +338,7 @@ export class AppController {
       this.minimap = null;
       this.noteLoaded.value = false;
       this.notePageExportPossible.value = false;
+      this.minimapFreeform.value = false;
       this.dropZoneVisible.value = true;
       this.cancelSelection();
       this.noteVersion.value++;

@@ -189,7 +189,7 @@ export function App() {
       </div>
       <div
         id="minimap"
-        class={app.noteLoaded.value ? "" : "hidden"}
+        class={[app.noteLoaded.value ? "" : "hidden", app.minimapFreeform.value ? "free" : ""].join(" ").trim()}
         ref={(el) => {
           if (el) app.attachMinimapContainer(el);
         }}

@@ -454,6 +454,25 @@
       #minimap.hidden {
         display: none;
       }
+      /* Infinite-canvas notes: a docked sidebar reserving layout width makes
+         no sense for a single free-roaming 2D thumbnail the way it does for
+         a scrollable stack of page thumbnails -- float it over the canvas
+         like the other overlay panels (zoom/export controls) instead. */
+      #minimap.free {
+        position: absolute;
+        flex: none;
+        top: 56px;
+        right: 12px;
+        bottom: 16px;
+        height: auto;
+        max-height: calc(100% - 72px);
+        border: 1px solid #333;
+        border-left: 1px solid #333;
+        border-radius: 10px;
+        background: rgba(10, 10, 10, 0.92);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        z-index: 6;
+      }
       #minimap-track {
         position: relative;
         margin: 0 auto;
