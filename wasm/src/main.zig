@@ -40,6 +40,9 @@ var g_textbox_draw_buf: []TextBoxDraw = &.{};
 var g_bytes_buf: []u8 = &.{};
 var g_vector_poly_buf: []VectorPoly = &.{};
 var g_vector_vertex_buf: []f32 = &.{}; // flat x0,y0,x1,y1,... pairs, indexed by VectorPoly.vertex_offset
+var g_asset_image_buf: []AssetImageDraw = &.{};
+var g_link_draw_buf: []LinkDraw = &.{};
+var g_audio_draw_buf: []AudioDraw = &.{};
 
 const PageInfo = extern struct { width: f32, height: f32, unbounded: u32, color: u32 };
 // creation_time is epoch milliseconds (fits exactly in f64's 53-bit mantissa,
@@ -50,6 +53,12 @@ const TextBoxDraw = extern struct { left: f32, top: f32, right: f32, bottom: f32
 // f64 first so the natural C layout doesn't need to insert padding before it
 // (matters since JS reads this by fixed byte stride -- see POLY_STRIDE in loader.ts).
 const VectorPoly = extern struct { creation_time: f64, color: u32, vertex_offset: u32, vertex_count: u32 };
+// stride 40: f64 creation_time, 4x f32 bounds, u32 page_index, u32 name_ptr, u32 name_len
+const AssetImageDraw = extern struct { creation_time: f64, left: f32, top: f32, right: f32, bottom: f32, page_index: u32, name_ptr: u32, name_len: u32 };
+// stride 40: f64 creation_time, 4x f32 bounds, u32 page_index, i32 link_type, u32 dest_ptr, u32 dest_len
+const LinkDraw = extern struct { creation_time: f64, left: f32, top: f32, right: f32, bottom: f32, page_index: u32, link_type: i32, dest_ptr: u32, dest_len: u32 };
+// stride 32: f64 creation_time, f64 duration_ms, u32 name_ptr, u32 name_len, u32 entry_ptr, u32 entry_len
+const AudioDraw = extern struct { creation_time: f64, duration_ms: f64, name_ptr: u32, name_len: u32, entry_ptr: u32, entry_len: u32 };
 
 /// Allocates `len` bytes in wasm linear memory for the caller (JS) to write
 /// into before calling `set_active_window` or `get_bytes` (small, transient
@@ -340,4 +349,76 @@ export fn get_bytes(name_ptr: u32, name_len: u32) u32 {
 
 export fn get_bytes_len() u32 {
     return @intCast(g_bytes_buf.len);
+}
+
+/// Returns ALL images in the note (not viewport-culled, unlike
+/// get_visible_image_*) -- for the Media panel's Images tab.
+export fn get_all_images_count() u32 {
+    const s = &(g_state orelse return 0);
+    gpa.free(g_asset_image_buf);
+    g_asset_image_buf = gpa.alloc(AssetImageDraw, s.note.images.len) catch return 0;
+    for (s.note.images, 0..) |img, i| {
+        g_asset_image_buf[i] = .{
+            .creation_time = @floatFromInt(img.creation_time),
+            .left = img.bounds.left,
+            .top = img.bounds.top,
+            .right = img.bounds.right,
+            .bottom = img.bounds.bottom,
+            .page_index = img.page_index,
+            .name_ptr = @intFromPtr(img.zip_entry_name.ptr),
+            .name_len = @intCast(img.zip_entry_name.len),
+        };
+    }
+    return @intCast(g_asset_image_buf.len);
+}
+
+export fn get_all_images_ptr() u32 {
+    return @intFromPtr(g_asset_image_buf.ptr);
+}
+
+/// Returns ALL hyperlinks in the note -- for the Links panel.
+export fn get_all_links_count() u32 {
+    const s = &(g_state orelse return 0);
+    gpa.free(g_link_draw_buf);
+    g_link_draw_buf = gpa.alloc(LinkDraw, s.note.links.len) catch return 0;
+    for (s.note.links, 0..) |link, i| {
+        g_link_draw_buf[i] = .{
+            .creation_time = @floatFromInt(link.creation_time),
+            .left = link.bounds.left,
+            .top = link.bounds.top,
+            .right = link.bounds.right,
+            .bottom = link.bounds.bottom,
+            .page_index = link.page_index,
+            .link_type = @truncate(link.link_type),
+            .dest_ptr = @intFromPtr(link.destination.ptr),
+            .dest_len = @intCast(link.destination.len),
+        };
+    }
+    return @intCast(g_link_draw_buf.len);
+}
+
+export fn get_all_links_ptr() u32 {
+    return @intFromPtr(g_link_draw_buf.ptr);
+}
+
+/// Returns ALL audio recordings in the note -- for the Media panel's Audio tab.
+export fn get_all_audio_count() u32 {
+    const s = &(g_state orelse return 0);
+    gpa.free(g_audio_draw_buf);
+    g_audio_draw_buf = gpa.alloc(AudioDraw, s.note.audio.len) catch return 0;
+    for (s.note.audio, 0..) |a, i| {
+        g_audio_draw_buf[i] = .{
+            .creation_time = @floatFromInt(a.creation_time),
+            .duration_ms = @floatFromInt(a.duration_ms),
+            .name_ptr = @intFromPtr(a.name.ptr),
+            .name_len = @intCast(a.name.len),
+            .entry_ptr = @intFromPtr(a.zip_entry_name.ptr),
+            .entry_len = @intCast(a.zip_entry_name.len),
+        };
+    }
+    return @intCast(g_audio_draw_buf.len);
+}
+
+export fn get_all_audio_ptr() u32 {
+    return @intFromPtr(g_audio_draw_buf.ptr);
 }
