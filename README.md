@@ -12,8 +12,10 @@ Live demo: **https://noteinexport.neswk.workers.dev**
 - Infinite-canvas + bounded (A4/Letter) notes — pan, zoom, minimap with viewport indicator
 - Pressure-aware strokes (replayed as variable-width polygons, not bitmaps)
 - Images, typed text boxes, and shapes composited in chronological order
-- **Export**: region-select or whole-page export to PNG / PDF (via `pdf-lib`) / SVG (true vector)
-- Offline/static deploy — served as Cloudflare Workers assets
+- **Export**: region-select or whole-page export to PNG / PDF (via `pdf-lib`) / SVG (true vector) — the selection menu attaches to your selection, with a progress indicator for larger exports
+- **Media panel**: browse every image and audio recording in the note, jump to where an image sits on the page, play/download audio, or grab everything at once as one zip — built entirely in Zig (real ZIP local/central headers + CRC32, no JS zip library)
+- **Links panel**: browse every hyperlink in the note, jump to its location, or open it externally
+- Offline/static deploy — served as Cloudflare Workers assets, auto-deployed on every push to `master`
 
 ## File format
 
@@ -25,8 +27,9 @@ Live demo: **https://noteinexport.neswk.workers.dev**
 | `…_db-wal`, `…_db-shm` | WAL/journal (applied on load) |
 | `note_meta.json` | Title, timestamps, folder, flags |
 | `note_extra.json`, `note_in_flag.json`, `note_label.json`, `notepdf_lost_info.json` | Metadata / flags / labels |
+| `note_image_<uuid>.*`, `note_audio_<uuid>.*` | Embedded image/audio assets, referenced by name from the DB |
 
-Key SQLite tables: `NoteContentEntity`, `PageEntity`, `StrokeEntity` (`record_json` → `points: {x,y,p,action}[]`), `TextBoxEntity`, `ImageEntity`, `ShapeEntity`, plus layers, outlines, audio. See [`FORMAT.md`](FORMAT.md) for full reverse-engineering notes.
+Key SQLite tables: `NoteContentEntity`, `PageEntity`, `StrokeEntity` (`record_json` → `points: {x,y,p,action}[]`), `TextBoxEntity`, `ImageEntity`, `ShapeEntity`, `HyperLinkEntity`, `AudioFileEntity`, plus layers and outlines. See [`FORMAT.md`](FORMAT.md) for full reverse-engineering notes.
 
 To read programmatically: unzip → open `…_db` with any SQLite library → read `StrokeEntity.record_json` → replay points.
 
@@ -37,6 +40,7 @@ To read programmatically: unzip → open `…_db` with any SQLite library → re
 1. Open https://noteinexport.neswk.workers.dev
 2. Drag a `.in` file onto the drop zone (or choose via file picker)
 3. Pan/zoom, use the minimap to jump pages, select a region or export the current page
+4. Open **Media** to browse/download images and audio (or grab a zip of everything), or **Links** to browse and jump to hyperlinks
 
 Nothing is uploaded — parsing stays in your browser (WASM memory).
 
@@ -73,19 +77,23 @@ To run integration tests locally, drop any `.in` export as `fixtures/diary.in` (
 
 ```
 notein-export/
-├── FORMAT.md          # reverse-engineered .in spec
-├── wasm/              # Zig → WASM core (zip, SQLite btree/pager, raster, window)
-│   ├── src/main.zig   # WASM C-ABI (alloc/open/render/get_visible_*)
-│   ├── src/model.zig  # note model (pages/strokes/images/text)
-│   └── build.zig      # -> web/src/wasm/notein.wasm
-├── web/               # Vite + TypeScript viewer
-│   ├── index.html     # shell (canvas, minimap, export controls)
-│   ├── src/main.ts    # app glue (file input, viewport, export wiring)
+├── FORMAT.md              # reverse-engineered .in spec
+├── .github/workflows/     # CI: build (Zig + web) and deploy on push to master
+├── wasm/                  # Zig → WASM core (zip read/write, SQLite btree/pager, raster, window)
+│   ├── src/main.zig       # WASM C-ABI (alloc/open/render/get_visible_*/get_all_*/build_media_zip)
+│   ├── src/model.zig      # note model (pages/strokes/images/text/links/audio)
+│   ├── src/zip.zig        # ZIP reader (for the .in container)
+│   ├── src/zip_writer.zig # ZIP writer (STORE-only, for the media download-all)
+│   └── build.zig          # -> web/src/wasm/notein.wasm
+├── web/                   # Vite + TypeScript/Preact viewer
+│   ├── index.html         # shell (canvas, minimap, export controls)
+│   ├── src/main.ts        # app glue (file input, viewport, export wiring)
 │   ├── src/wasm/loader.ts # typed WASM wrapper (zero-copy views)
-│   ├── src/canvas/    # renderer, viewport, minimap, export-render
-│   └── src/export.ts  # PNG/PDF/SVG export helpers
-├── fixtures/          # (git-ignored) local .in samples only
-└── wrangler.toml      # Cloudflare Workers assets deploy
+│   ├── src/canvas/        # renderer, viewport, minimap, export-render, layout
+│   ├── src/media-panel.tsx, links-panel.tsx, icons.tsx  # Preact UI for the browse panels
+│   └── src/export.ts      # PNG/PDF/SVG export helpers
+├── fixtures/           # (git-ignored) local .in samples only
+└── wrangler.toml       # Cloudflare Workers assets deploy
 ```
 
 ## How rendering works
@@ -94,26 +102,20 @@ notein-export/
 2. `set_active_window` + `render_viewport(page, x,y,w,h, pixelW, pixelH, ...)` — returns packed polygon vertices over WASM memory
 3. JS `Renderer` draws polygons via Canvas2D, compositing images/text by `creationTime`
 4. `export-render.ts` reuses same `render_viewport` path but to an offscreen canvas/SVG at chosen `scale` (1×/2×/4×)
+5. The Media/Links panels call whole-note (not viewport-culled) exports — `get_all_images/links/audio` — once, lazily, on first open; per-item bytes still come from the same `get_bytes(name)` used for on-canvas images
+6. "Download all" calls `build_media_zip()`, which reads every image/audio asset straight out of the already-open `.in` archive and assembles a real ZIP (local + central directory headers, CRC32) inside wasm — JS just receives the finished bytes and triggers the download
 
 ## Deployment
 
-Static site is deployed as Cloudflare Workers assets (`noteinexport.neswk.workers.dev`):
+Static site is deployed as Cloudflare Workers assets (`noteinexport.neswk.workers.dev`).
+
+**Automatic:** `.github/workflows/deploy.yml` builds (Zig nightly → wasm → `vite build`) and runs `wrangler deploy` on every push to `master`. Needs a `CLOUDFLARE_API_TOKEN` repo secret with Workers edit permission for the account in `wrangler.toml`'s `account_id`.
+
+**Manual:**
 
 ```bash
-# build first
-cd web && bun run build
-
-# deploy (wrangler logged in via OAuth, account nes)
+cd web && bun run build   # -> zig build + vite build
 bunx wrangler deploy --config ../wrangler.toml
-# or: bunx wrangler deploy --cwd web  (uses web/wrangler.toml if placed there)
-```
-
-`wrangler.toml` at repo root:
-
-```toml
-name = "noteinexport"
-compatibility_date = "2025-08-24"
-assets = { directory = "./web/dist", not_found_handling = "single-page-application" }
 ```
 
 ## Privacy & notes
