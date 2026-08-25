@@ -9,30 +9,32 @@ const model = @import("model.zig");
 pub fn tessellateStroke(points: []const model.Point, base_width: f32, out: [][2]f32) [][2]f32 {
     if (points.len < 2 or out.len < points.len * 2) return out[0..0];
 
+    const Vec2 = @Vector(2, f32);
     var n: usize = 0;
     var i: usize = 0;
     while (i < points.len) : (i += 1) {
         const p = points[i];
         const prev = points[if (i == 0) 0 else i - 1];
         const next = points[if (i + 1 < points.len) i + 1 else i];
-        var dx = next.x - prev.x;
-        var dy = next.y - prev.y;
-        const len = @sqrt(dx * dx + dy * dy);
+        // SIMD: diff as 2-lane vector, length via dot product
+        var diff: Vec2 = .{ next.x - prev.x, next.y - prev.y };
+        const len = @sqrt(@reduce(.Add, diff * diff));
         if (len > 0.0001) {
-            dx /= len;
-            dy /= len;
+            diff /= @as(Vec2, @splat(len));
         } else {
-            dx = 0;
-            dy = 0;
+            diff = @splat(0);
         }
-        // Normal (perpendicular) direction.
-        const nx = -dy;
-        const ny = dx;
+        // Normal (perpendicular) direction: (-dy, dx)
+        const normal: Vec2 = .{ -diff[1], diff[0] };
         const radius = @max(0.4, base_width * @max(0.15, p.p)) * 0.5;
+        const p_vec: Vec2 = .{ p.x, p.y };
+        const offset = normal * @as(Vec2, @splat(radius));
+        const left: Vec2 = p_vec + offset;
+        const right: Vec2 = p_vec - offset;
 
-        out[n] = .{ p.x + nx * radius, p.y + ny * radius };
+        out[n] = .{ left[0], left[1] };
         n += 1;
-        out[points.len * 2 - 1 - i] = .{ p.x - nx * radius, p.y - ny * radius };
+        out[points.len * 2 - 1 - i] = .{ right[0], right[1] };
     }
     return out[0 .. points.len * 2];
 }
@@ -53,19 +55,25 @@ pub fn tessellateStrokeScratch(points: []const model.Point, base_width: f32) [][
 /// filled polygons). Degenerate (zero-length) segments collapse to a
 /// zero-area quad, which `raster.Canvas.fillPolygon` already no-ops on.
 pub fn quadForLine(a: [2]f32, b: [2]f32, width: f32) [4][2]f32 {
-    var dx = b[0] - a[0];
-    var dy = b[1] - a[1];
-    const len = @sqrt(dx * dx + dy * dy);
+    const Vec2 = @Vector(2, f32);
+    const av: Vec2 = .{ a[0], a[1] };
+    const bv: Vec2 = .{ b[0], b[1] };
+    var diff: Vec2 = bv - av;
+    const len = @sqrt(@reduce(.Add, diff * diff));
     if (len < 0.0001) return .{ a, a, a, a };
-    dx /= len;
-    dy /= len;
-    const nx = -dy * @max(0.4, width) * 0.5;
-    const ny = dx * @max(0.4, width) * 0.5;
+    diff /= @as(Vec2, @splat(len));
+    const radius = @max(0.4, width) * 0.5;
+    // normal * radius: (-dy, dx) * radius
+    const offset: Vec2 = .{ -diff[1] * radius, diff[0] * radius };
+    const a_left: Vec2 = av + offset;
+    const b_left: Vec2 = bv + offset;
+    const b_right: Vec2 = bv - offset;
+    const a_right: Vec2 = av - offset;
     return .{
-        .{ a[0] + nx, a[1] + ny },
-        .{ b[0] + nx, b[1] + ny },
-        .{ b[0] - nx, b[1] - ny },
-        .{ a[0] - nx, a[1] - ny },
+        .{ a_left[0], a_left[1] },
+        .{ b_left[0], b_left[1] },
+        .{ b_right[0], b_right[1] },
+        .{ a_right[0], a_right[1] },
     };
 }
 

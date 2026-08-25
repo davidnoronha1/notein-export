@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const strip = b.option(bool, "strip", "Strip debug symbols") orelse (optimize != .debug);
+
     const wasm = b.addExecutable(.{
         .name = "notein",
         .root_module = wasm_mod,
@@ -22,6 +24,7 @@ pub fn build(b: *std.Build) void {
     wasm.entry = .disabled;
     wasm.rdynamic = true;
     wasm.import_memory = false;
+    wasm.root_module.strip = strip;
 
     const wasm_out = b.addInstallArtifact(wasm, .{
         .dest_dir = .{ .override = .{ .custom = "../../web/src/wasm" } },

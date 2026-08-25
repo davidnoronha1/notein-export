@@ -7,7 +7,6 @@
 interface NoteinExports {
   memory: WebAssembly.Memory;
   alloc(len: number): number;
-  alloc_big(len: number): number;
   open(ptr: number, len: number): number;
   get_page_count(): number;
   get_page_info_ptr(): number;
@@ -148,12 +147,9 @@ export class NoteinModule {
     return new TextDecoder().decode(new Uint8Array(this.memory, ptr, len));
   }
 
-  /** Loads a `.in` file's bytes. Throws if the file can't be parsed.
-   * Uses `alloc_big` (not the general-purpose `alloc`) since the uploaded
-   * file is the one genuinely large, long-lived buffer per load -- see
-   * wasm/src/big_alloc.zig. */
+  /** Loads a `.in` file's bytes. Throws if the file can't be parsed. */
   openFile(bytes: Uint8Array): void {
-    const ptr = this.exports.alloc_big(bytes.length);
+    const ptr = this.exports.alloc(bytes.length);
     if (ptr === 0 && bytes.length > 0) throw new Error("wasm alloc failed");
     new Uint8Array(this.memory, ptr, bytes.length).set(bytes);
     const status = this.exports.open(ptr, bytes.length);
@@ -384,7 +380,7 @@ export class NoteinModule {
 
   /** Builds a zip bundling every image and audio recording in the note
    * (images/ and audio/ folders, stored uncompressed) entirely in wasm --
-   * see wasm/src/zip_writer.zig. */
+   * see wasm/src/zipper.zig. */
   getMediaZip(): Uint8Array {
     const len = this.exports.build_media_zip();
     if (len === 0) return new Uint8Array(0);

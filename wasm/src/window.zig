@@ -3,6 +3,7 @@ const model = @import("model.zig");
 const json = @import("json.zig");
 const record = @import("sqlite/record.zig");
 const tessellate = @import("tessellate.zig");
+const util = @import("util.zig");
 
 pub const Point = model.Point;
 
@@ -76,9 +77,11 @@ pub const PageContent = struct {
     seen: []u32 = &.{},
 };
 
-fn argbFromSigned(v: i64) u32 {
-    return @truncate(@as(u64, @bitCast(v)));
-}
+const argbFromSigned = util.argbFromSigned;
+const readF32Col = util.readColumnF32;
+const readI64Col = util.readColumnI64;
+const clampCell = util.clampCell;
+const gridCellIndex = util.gridCellIndex;
 
 fn decodeStroke(alloc: std.mem.Allocator, note: *const model.Note, entry: model.StrokeEntry) !DecodedStroke {
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -87,16 +90,21 @@ fn decodeStroke(alloc: std.mem.Allocator, note: *const model.Note, entry: model.
 
     const hdr = try entry.row.header();
     const raw = try entry.row.readColumnAlloc(scratch, note.db, hdr, 4); // record_json
-    const v = json.parse(scratch, raw) catch return .{ .bounds = entry.bounds, .color = 0xFF000000, .width = 1, .points = &.{}, .creation_time = 0 };
+    const parsed = json.parseTyped(json.StrokeJson, scratch, raw) catch return .{
+        .bounds = entry.bounds,
+        .color = 0xFF000000,
+        .width = 1,
+        .points = &.{},
+        .creation_time = 0,
+    };
 
-    const color = argbFromSigned(if (v.get("color")) |c| c.asI64() else 0xFF000000);
-    const width = if (v.get("width")) |w| w.asF32() else 1;
-    const creation_time = if (v.get("creationTime")) |c| c.asI64() else 0;
-    const pts_val = v.get("points") orelse return .{ .bounds = entry.bounds, .color = color, .width = width, .points = &.{}, .creation_time = creation_time };
+    const color = argbFromSigned(parsed.color);
+    const width = parsed.width;
+    const creation_time = parsed.creationTime;
 
-    var raw_points = try scratch.alloc(Point, pts_val.array.len);
-    for (pts_val.array, 0..) |pv, i| {
-        raw_points[i] = .{ .x = pv.get("x").?.asF32(), .y = pv.get("y").?.asF32(), .p = if (pv.get("p")) |p| p.asF32() else 0.5 };
+    var raw_points = try scratch.alloc(Point, parsed.points.len);
+    for (parsed.points, 0..) |pj, i| {
+        raw_points[i] = .{ .x = pj.x, .y = pj.y, .p = pj.p };
     }
     const points = try smoothPoints(alloc, raw_points);
     const tess_poly = try tessellatePoints(alloc, points, width);
@@ -138,7 +146,24 @@ fn smoothPoints(alloc: std.mem.Allocator, raw: []const Point) ![]Point {
         const remaining_budget = if (MAX_TOTAL_POINTS > out.items.len) MAX_TOTAL_POINTS - out.items.len else 0;
         const steps: usize = @min(@min(MAX_SUBDIV, remaining_budget), @max(1, @as(usize, @intFromFloat(seg_len / UNITS_PER_STEP))));
 
+        // AVX2 (8-wide) batch: process 8 t-values at once with Vec8, tail scalar.
+        // MAX_SUBDIV is 24, so a typical segment does 3 batches of 8. WASM SIMD is
+        // 128-bit (4-wide) — Zig lowers Vec8 to 2× Vec4, still 2× fewer loop
+        // iterations than scalar. Native x86_64 with AVX2 does 8-wide in one go.
+        const Vec8 = @Vector(8, f32);
         var s: usize = 1;
+        // Batch 8
+        while (s + 7 <= steps) : (s += 8) {
+            var t_vec: Vec8 = undefined;
+            inline for (0..8) |k| {
+                const sk = s + k;
+                t_vec[k] = @as(f32, @floatFromInt(sk)) / @as(f32, @floatFromInt(steps));
+            }
+            const batch = catmullRomBatch8(p0, p1, p2, p3, t_vec);
+            for (batch) |pt| try out.append(pt);
+            if (out.items.len >= MAX_TOTAL_POINTS) break;
+        }
+        // Tail scalar (covers the 9th point case: 8+1)
         while (s <= steps) : (s += 1) {
             const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(steps));
             try out.append(catmullRom(p0, p1, p2, p3, t));
@@ -149,13 +174,49 @@ fn smoothPoints(alloc: std.mem.Allocator, raw: []const Point) ![]Point {
 }
 
 fn catmullRom(p0: Point, p1: Point, p2: Point, p3: Point, t: f32) Point {
+    // SIMD: compute x,y,p lanes together as Vec3
+    const Vec3 = @Vector(3, f32);
+    const p0v: Vec3 = .{ p0.x, p0.y, p0.p };
+    const p1v: Vec3 = .{ p1.x, p1.y, p1.p };
+    const p2v: Vec3 = .{ p2.x, p2.y, p2.p };
+    const p3v: Vec3 = .{ p3.x, p3.y, p3.p };
     const t2 = t * t;
     const t3 = t2 * t;
-    return .{
-        .x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
-        .y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
-        .p = 0.5 * ((2 * p1.p) + (-p0.p + p2.p) * t + (2 * p0.p - 5 * p1.p + 4 * p2.p - p3.p) * t2 + (-p0.p + 3 * p1.p - 3 * p2.p + p3.p) * t3),
-    };
+    const tv: Vec3 = @splat(t);
+    const t2v: Vec3 = @splat(t2);
+    const t3v: Vec3 = @splat(t3);
+    const res: Vec3 = @as(Vec3, @splat(0.5)) * (
+        @as(Vec3, @splat(2)) * p1v +
+        (-p0v + p2v) * tv +
+        (@as(Vec3, @splat(2)) * p0v - @as(Vec3, @splat(5)) * p1v + @as(Vec3, @splat(4)) * p2v - p3v) * t2v +
+        (-p0v + @as(Vec3, @splat(3)) * p1v - @as(Vec3, @splat(3)) * p2v + p3v) * t3v
+    );
+    return .{ .x = res[0], .y = res[1], .p = res[2] };
+}
+
+// AVX2-width (8-lane) batch version — computes 8 Catmull-Rom points in parallel.
+// Each lane k holds t[k]; x/y/p are computed as Vec8. This is the hot path for
+// smoothPoints: 24 subdivisions → 3× Vec8 batches (covers 9 points as 8+1).
+fn catmullRomBatch8(p0: Point, p1: Point, p2: Point, p3: Point, t: @Vector(8, f32)) [8]Point {
+    const Vec8 = @Vector(8, f32);
+    const t2: Vec8 = t * t;
+    const t3: Vec8 = t2 * t;
+
+    const p0x: Vec8 = @splat(p0.x); const p0y: Vec8 = @splat(p0.y); const p0p: Vec8 = @splat(p0.p);
+    const p1x: Vec8 = @splat(p1.x); const p1y: Vec8 = @splat(p1.y); const p1p: Vec8 = @splat(p1.p);
+    const p2x: Vec8 = @splat(p2.x); const p2y: Vec8 = @splat(p2.y); const p2p: Vec8 = @splat(p2.p);
+    const p3x: Vec8 = @splat(p3.x); const p3y: Vec8 = @splat(p3.y); const p3p: Vec8 = @splat(p3.p);
+
+    const two: Vec8 = @splat(2); const three: Vec8 = @splat(3); const four: Vec8 = @splat(4); const five: Vec8 = @splat(5);
+    const half: Vec8 = @splat(0.5);
+
+    const x = half * (two * p1x + (-p0x + p2x) * t + (two * p0x - five * p1x + four * p2x - p3x) * t2 + (-p0x + three * p1x - three * p2x + p3x) * t3);
+    const y = half * (two * p1y + (-p0y + p2y) * t + (two * p0y - five * p1y + four * p2y - p3y) * t2 + (-p0y + three * p1y - three * p2y + p3y) * t3);
+    const p = half * (two * p1p + (-p0p + p2p) * t + (two * p0p - five * p1p + four * p2p - p3p) * t2 + (-p0p + three * p1p - three * p2p + p3p) * t3);
+
+    var out: [8]Point = undefined;
+    inline for (0..8) |k| out[k] = .{ .x = x[k], .y = y[k], .p = p[k] };
+    return out;
 }
 
 fn decodeShape(alloc: std.mem.Allocator, note: *const model.Note, entry: model.ShapeEntry) !DecodedShape {
@@ -174,9 +235,9 @@ fn decodeShape(alloc: std.mem.Allocator, note: *const model.Note, entry: model.S
     const creation_time = readI64Col(note.db, entry.row, hdr, 11);
 
     var points: [][2]f32 = &.{};
-    if (json.parse(scratch, points_json)) |v| {
-        points = try alloc.alloc([2]f32, v.array.len);
-        for (v.array, 0..) |pv, i| points[i] = .{ pv.get("x").?.asF32(), pv.get("y").?.asF32() };
+    if (json.parseTyped([]json.ShapePointJson, scratch, points_json)) |typed_pts| {
+        points = try alloc.alloc([2]f32, typed_pts.len);
+        for (typed_pts, 0..) |pj, i| points[i] = .{ pj.x, pj.y };
     } else |_| {}
 
     return .{ .bounds = entry.bounds, .color = color, .width = width, .shape_type = shape_type, .points = points, .creation_time = creation_time };
@@ -194,26 +255,6 @@ fn decodeTextBox(alloc: std.mem.Allocator, note: *const model.Note, entry: model
     return .{ .bounds = entry.bounds, .text = text, .text_size = text_size, .color = color, .creation_time = creation_time };
 }
 
-fn readF32Col(db: anytype, row: anytype, hdr: record.RecordHeader, i: usize) f32 {
-    var buf: [8]u8 = undefined;
-    const range = hdr.columnRange(i);
-    row.readColumn(db, hdr, i, buf[0..range.len]);
-    const v = record.decodeValue(hdr.serialType(i), buf[0..range.len]);
-    return switch (v) {
-        .real => |r| @floatCast(r),
-        .int => |n| @floatFromInt(n),
-        else => 0,
-    };
-}
-
-fn readI64Col(db: anytype, row: anytype, hdr: record.RecordHeader, i: usize) i64 {
-    var buf: [8]u8 = undefined;
-    const range = hdr.columnRange(i);
-    row.readColumn(db, hdr, i, buf[0..range.len]);
-    const v = record.decodeValue(hdr.serialType(i), buf[0..range.len]);
-    return if (v == .int) v.int else 0;
-}
-
 fn boundsOfRef(ref: DrawRef, strokes: []const DecodedStroke, shapes: []const DecodedShape) model.Bounds {
     return switch (ref.kind) {
         .stroke => strokes[ref.index].bounds,
@@ -222,12 +263,6 @@ fn boundsOfRef(ref: DrawRef, strokes: []const DecodedStroke, shapes: []const Dec
 }
 
 const CellRange = struct { cx0: u32, cx1: u32, cy0: u32, cy1: u32 };
-
-fn clampCell(f: f32, n: u32) u32 {
-    if (n == 0 or f <= 0) return 0;
-    const fi: u32 = @intFromFloat(@floor(f));
-    return @min(fi, n - 1);
-}
 
 fn cellRangeFor(b: model.Bounds, min_x: f32, min_y: f32, cell_w: f32, cell_h: f32, cols: u32, rows: u32) CellRange {
     return .{

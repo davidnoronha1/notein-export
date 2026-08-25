@@ -1,11 +1,17 @@
 const std = @import("std");
-const zip = @import("zip.zig");
-const wal = @import("wal.zig");
+const zip_reader = @import("zip_reader.zig");
+pub const ZipError = zip_reader.ZipError;
+pub const ZipEntry = zip_reader.ZipEntry;
+pub const ZipArchive = zip_reader.ZipArchive;
+pub const openZip = zip_reader.openZip;
+
+const wal = @import("sqlite/wal.zig");
 const pager = @import("sqlite/pager.zig");
 const btree = @import("sqlite/btree.zig");
 const schema = @import("sqlite/schema.zig");
 const record = @import("sqlite/record.zig");
 const json = @import("json.zig");
+const util = @import("util.zig");
 
 pub const Bounds = struct { left: f32, top: f32, right: f32, bottom: f32 };
 
@@ -77,7 +83,7 @@ pub const AudioAsset = struct {
 
 pub const Note = struct {
     alloc: std.mem.Allocator,
-    archive: zip.Archive,
+    archive: ZipArchive,
     db: pager.Db,
 
     pages: []Page,
@@ -101,65 +107,44 @@ pub const Error = error{
     NoteNotFound,
     TableNotFound,
     TooManyEntries,
-} || zip.Error || pager.Error || btree.Error || record.Error || json.Error || std.mem.Allocator.Error;
+} || ZipError || pager.Error || btree.Error || record.Error || json.Error || std.mem.Allocator.Error;
 
 const MAX_ZIP_ENTRIES = 512;
 
-fn dupJsonString(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
-    return alloc.dupe(u8, s);
-}
+const readColumn = util.readColumn;
+const readColumnF32 = util.readColumnF32;
+const readColumnBool = util.readColumnBool;
+const readColumnI64 = util.readColumnI64;
+const argbFromSigned = util.argbFromSigned;
 
-fn readColumn(alloc: std.mem.Allocator, db: pager.Db, row: btree.Row, hdr: record.RecordHeader, i: usize) ![]const u8 {
-    return row.readColumnAlloc(alloc, db, hdr, i);
-}
-
-fn readColumnF32(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, i: usize) f32 {
-    if (i >= hdr.column_count) return 0;
-    const range = hdr.columnRange(i);
-    var buf: [8]u8 = undefined;
-    row.readColumn(db, hdr, i, buf[0..range.len]);
-    const v = record.decodeValue(hdr.serialType(i), buf[0..range.len]);
-    return switch (v) {
-        .real => |r| @floatCast(r),
-        .int => |n| @floatFromInt(n),
-        else => 0,
-    };
-}
-
-fn readColumnBool(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, i: usize) bool {
-    if (i >= hdr.column_count) return false;
-    const range = hdr.columnRange(i);
-    var buf: [8]u8 = undefined;
-    row.readColumn(db, hdr, i, buf[0..range.len]);
-    const v = record.decodeValue(hdr.serialType(i), buf[0..range.len]);
-    return switch (v) {
-        .int => |n| n != 0,
-        else => false,
-    };
-}
-
-fn readColumnI64(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, i: usize) i64 {
-    if (i >= hdr.column_count) return 0;
-    const range = hdr.columnRange(i);
-    var buf: [8]u8 = undefined;
-    row.readColumn(db, hdr, i, buf[0..range.len]);
-    const v = record.decodeValue(hdr.serialType(i), buf[0..range.len]);
-    return if (v == .int) v.int else 0;
-}
-
-/// Android packs colors as signed 32-bit ARGB ints; reinterpret the low 32
-/// bits as unsigned (matches the pattern used for stroke/shape/text colors).
-fn argbFromSigned(v: i64) u32 {
-    return @truncate(@as(u64, @bitCast(v)));
-}
-
-fn readBounds(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, left_col: usize) Bounds {
-    return .{
-        .left = readColumnF32(db, row, hdr, left_col),
-        .top = readColumnF32(db, row, hdr, left_col + 1),
-        .right = readColumnF32(db, row, hdr, left_col + 2),
+// Reads four bound columns starting at `left_col` and, for unbounded
+// (infinite-canvas) pages only, expands pages[page_index].content_bounds to
+// include them. Bounded pages have a fixed paper_spec so their coordinate
+// space is already known; only infinite-canvas pages need this tracked extent
+// to tell the frontend where ink actually lives.
+// SIMD: 4-wide vector [left, top, right, bottom]; left/top take min, right/bottom take max.
+fn readBoundsTracked(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, left_col: usize, pages: []Page, page_index: u32) Bounds {
+    const b = Bounds{
+        .left   = readColumnF32(db, row, hdr, left_col),
+        .top    = readColumnF32(db, row, hdr, left_col + 1),
+        .right  = readColumnF32(db, row, hdr, left_col + 2),
         .bottom = readColumnF32(db, row, hdr, left_col + 3),
     };
+    if (page_index < pages.len) {
+        const p = &pages[page_index];
+        if (p.unbounded) {
+            if (p.content_bounds) |*cb| {
+                const Vec4 = @Vector(4, f32);
+                const cur: Vec4 = .{ cb.left, cb.top, cb.right, cb.bottom };
+                const nxt: Vec4 = .{ b.left,  b.top,  b.right,  b.bottom  };
+                const res: Vec4 = .{ @min(cur, nxt)[0], @min(cur, nxt)[1], @max(cur, nxt)[2], @max(cur, nxt)[3] };
+                cb.* = .{ .left = res[0], .top = res[1], .right = res[2], .bottom = res[3] };
+            } else {
+                p.content_bounds = b;
+            }
+        }
+    }
+    return b;
 }
 
 /// Loads a `.in` file's active note into a fully-indexed (but not fully
@@ -195,8 +180,8 @@ fn readBounds(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, left_col: 
 /// same base allocator when the note is closed/replaced, since the note
 /// arena's bulk-deinit won't touch it.
 pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_bytes: []const u8) !Note {
-    const entries_buf = try alloc.alloc(zip.Entry, MAX_ZIP_ENTRIES);
-    const archive = try zip.open(alloc, file_bytes, entries_buf);
+    const entries_buf = try alloc.alloc(ZipEntry, MAX_ZIP_ENTRIES);
+    const archive = try openZip(alloc, file_bytes, entries_buf);
 
     const db_entry = archive.findSuffix("_db") orelse return Error.DbEntryNotFound;
 
@@ -255,8 +240,7 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
     try btree.scanTable(db, note_root, *NoteCtx, &note_ctx, visitNote);
     const page_list_json = note_ctx.page_list_json orelse return Error.NoteNotFound;
 
-    const page_ids_val = try json.parse(alloc, page_list_json);
-    const page_ids = page_ids_val.array;
+    const page_ids = json.parseTyped([][]const u8, alloc, page_list_json) catch return Error.SyntaxError;
 
     // PageEntity rows keyed by id (TEXT primary key, not the implicit rowid),
     // so collect them all and match by string against page_list's order.
@@ -275,9 +259,9 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
             var width: f32 = 0;
             var height: f32 = 0;
             if (paper_spec_json.len > 0) {
-                if (json.parse(ctx.alloc, paper_spec_json)) |spec| {
-                    width = if (spec.get("preciseWidth")) |w| w.asF32() else 0;
-                    height = if (spec.get("preciseHeight")) |h| h.asF32() else 0;
+                if (json.parseTyped(json.PaperSpecJson, ctx.alloc, paper_spec_json)) |spec| {
+                    width = spec.preciseWidth;
+                    height = spec.preciseHeight;
                 } else |_| {}
             }
             const unbounded = readColumnBool(ctx.db, row, hdr, 10);
@@ -291,10 +275,8 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
             const paper_theme_json = try readColumn(ctx.alloc, ctx.db, row, hdr, 4);
             var background_color: u32 = 0xFFFFFFFF;
             if (paper_theme_json.len > 0) {
-                if (json.parse(ctx.alloc, paper_theme_json)) |theme| {
-                    if (theme.get("baseTheme")) |base| {
-                        if (base.get("color")) |c| background_color = argbFromSigned(c.asI64());
-                    }
+                if (json.parseTyped(json.PaperThemeJson, ctx.alloc, paper_theme_json)) |theme| {
+                    if (theme.baseTheme) |base| background_color = argbFromSigned(base.color);
                 } else |_| {}
             }
             try ctx.map.put(id, .{ .id = id, .unbounded = unbounded, .width = width, .height = height, .background_color = background_color });
@@ -303,50 +285,33 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
     try btree.scanTable(db, page_root, *PageScanCtx, &page_scan_ctx, visitPage);
 
     var pages = try alloc.alloc(Page, page_ids.len);
-    for (page_ids, 0..) |pid_val, i| {
-        const pid = pid_val.asStr();
+    for (page_ids, 0..) |pid, i| {
         pages[i] = page_map.get(pid) orelse .{ .id = pid, .unbounded = note_ctx.unbounded, .width = 0, .height = 0, .background_color = 0xFFFFFFFF };
     }
 
-    const strokes = try scanIndexedTable(Empty, alloc, db, "StrokeEntity", pages, 1, 5);
-    const shapes = try scanIndexedTable(Empty, alloc, db, "ShapeEntity", pages, 1, 12);
-    const text_boxes = try scanIndexedTable(Empty, alloc, db, "TextBoxEntity", pages, 1, 14);
-    const images = try scanImages(alloc, db, archive, pages);
-    const links = try scanLinks(alloc, db, pages);
-    const audio = try scanAudio(alloc, db, archive);
+    // Build O(1) page-id -> index map to avoid O(P) linear scan per row
+    // (previously each scan did `for(pages) if(eql)`) — shared by all scans
+    // below, so we pay the hash-map build once instead of per-row.
+    var page_index_map = std.StringHashMap(u32).init(alloc);
+    for (pages, 0..) |p, i| try page_index_map.put(p.id, @intCast(i));
 
-    for (strokes) |e| expandContentBounds(pages, e.page_index, e.bounds);
-    for (shapes) |e| expandContentBounds(pages, e.page_index, e.bounds);
-    for (text_boxes) |e| expandContentBounds(pages, e.page_index, e.bounds);
-    for (images) |e| expandContentBounds(pages, e.page_index, e.bounds);
-    for (links) |e| expandContentBounds(pages, e.page_index, e.bounds);
+    // Scan all six tables and expand per-page content_bounds in one call.
+    const assets = try iterateAllAssets(alloc, db, archive, pages, &page_index_map);
 
     return .{
         .alloc = alloc,
         .archive = archive,
         .db = db,
         .pages = pages,
-        .strokes = strokes,
-        .shapes = shapes,
-        .text_boxes = text_boxes,
-        .images = images,
-        .links = links,
-        .audio = audio,
+        .strokes = assets.strokes,
+        .shapes = assets.shapes,
+        .text_boxes = assets.text_boxes,
+        .images = assets.images,
+        .links = assets.links,
+        .audio = assets.audio,
     };
 }
 
-fn expandContentBounds(pages: []Page, page_index: u32, b: Bounds) void {
-    if (page_index >= pages.len) return;
-    const p = &pages[page_index];
-    if (p.content_bounds) |*cb| {
-        cb.left = @min(cb.left, b.left);
-        cb.top = @min(cb.top, b.top);
-        cb.right = @max(cb.right, b.right);
-        cb.bottom = @max(cb.bottom, b.bottom);
-    } else {
-        p.content_bounds = b;
-    }
-}
 
 fn extractNoteUuid(db_entry_name: []const u8) ?[]const u8 {
     const prefix = "note_database_note_";
@@ -365,7 +330,8 @@ fn scanIndexedTable(
     alloc: std.mem.Allocator,
     db: pager.Db,
     table_name: []const u8,
-    pages: []const Page,
+    page_index_map: *const std.StringHashMap(u32),
+    pages: []Page,
     page_id_col: usize,
     bounds_col: usize,
 ) ![]IndexEntry(Extra) {
@@ -374,7 +340,8 @@ fn scanIndexedTable(
     const Ctx = struct {
         alloc: std.mem.Allocator,
         db: pager.Db,
-        pages: []const Page,
+        map: *const std.StringHashMap(u32),
+        pages: []Page,
         page_id_col: usize,
         bounds_col: usize,
         out: std.array_list.Managed(IndexEntry(Extra)),
@@ -382,6 +349,7 @@ fn scanIndexedTable(
     var ctx = Ctx{
         .alloc = alloc,
         .db = db,
+        .map = page_index_map,
         .pages = pages,
         .page_id_col = page_id_col,
         .bounds_col = bounds_col,
@@ -392,15 +360,8 @@ fn scanIndexedTable(
         fn f(c: *Ctx, row: btree.Row) !void {
             const hdr = try row.header();
             const page_id = try readColumn(c.alloc, c.db, row, hdr, c.page_id_col);
-            var page_index: u32 = std.math.maxInt(u32);
-            for (c.pages, 0..) |p, i| {
-                if (std.mem.eql(u8, p.id, page_id)) {
-                    page_index = @intCast(i);
-                    break;
-                }
-            }
-            if (page_index == std.math.maxInt(u32)) return; // orphaned row, page not in this note's page_list
-            const bounds = readBounds(c.db, row, hdr, c.bounds_col);
+            const page_index = c.map.get(page_id) orelse return; // orphaned row
+            const bounds = readBoundsTracked(c.db, row, hdr, c.bounds_col, c.pages, page_index);
             try c.out.append(.{ .page_index = page_index, .bounds = bounds, .row = row, .extra = .{} });
         }
     }.f;
@@ -408,116 +369,122 @@ fn scanIndexedTable(
     return ctx.out.toOwnedSlice();
 }
 
-fn scanImages(alloc: std.mem.Allocator, db: pager.Db, archive: zip.Archive, pages: []const Page) ![]ImageAsset {
-    const root = (try schema.findTableRoot(db, "ImageEntity")) orelse return Error.TableNotFound;
-
-    const Ctx = struct {
-        alloc: std.mem.Allocator,
-        db: pager.Db,
-        archive: zip.Archive,
-        pages: []const Page,
-        out: std.array_list.Managed(ImageAsset),
+// Scans all six asset tables and expands per-page content_bounds -- one call
+// covers what used to be two separate steps (scanAllAssets + expand loops).
+// Still 6 B-tree walks (unavoidable, separate B-trees); audio has no bounds
+// and is excluded from the content_bounds pass.
+const AllAssets = struct {
+    strokes: []StrokeEntry,
+    shapes: []ShapeEntry,
+    text_boxes: []TextBoxEntry,
+    images: []ImageAsset,
+    links: []LinkAsset,
+    audio: []AudioAsset,
+};
+fn iterateAllAssets(
+    alloc: std.mem.Allocator,
+    db: pager.Db,
+    archive: ZipArchive,
+    pages: []Page,
+    page_index_map: *const std.StringHashMap(u32),
+) !AllAssets {
+    // readBoundsTracked expands pages[page_index].content_bounds as a side-effect
+    // on every row read, so no separate expand pass is needed after scanning.
+    return .{
+        .strokes    = try scanIndexedTable(Empty, alloc, db, "StrokeEntity",  page_index_map, pages, 1, 5),
+        .shapes     = try scanIndexedTable(Empty, alloc, db, "ShapeEntity",   page_index_map, pages, 1, 12),
+        .text_boxes = try scanIndexedTable(Empty, alloc, db, "TextBoxEntity", page_index_map, pages, 1, 14),
+        .images     = try scanAssetTable(ImageAsset, alloc, db, "ImageEntity",     ImageCtx{ .archive = archive, .map = page_index_map, .pages = pages }, decodeImage),
+        .links      = try scanAssetTable(LinkAsset,  alloc, db, "HyperLinkEntity", LinkCtx{ .map = page_index_map, .pages = pages },                     decodeLink),
+        .audio      = try scanAssetTable(AudioAsset, alloc, db, "AudioFileEntity", AudioCtx{ .archive = archive },                                         decodeAudio),
     };
-    var ctx = Ctx{ .alloc = alloc, .db = db, .archive = archive, .pages = pages, .out = std.array_list.Managed(ImageAsset).init(alloc) };
-
-    const visit = struct {
-        fn f(c: *Ctx, row: btree.Row) !void {
-            const hdr = try row.header();
-            // ImageEntity: id, uri, layer, layer_id, bounds, rotation, page_id,
-            // creation_time, last_modification_time, left, top, right, bottom, fixed
-            const uri = try readColumn(c.alloc, c.db, row, hdr, 1);
-            const page_id = try readColumn(c.alloc, c.db, row, hdr, 6);
-
-            var page_index: u32 = std.math.maxInt(u32);
-            for (c.pages, 0..) |p, i| {
-                if (std.mem.eql(u8, p.id, page_id)) {
-                    page_index = @intCast(i);
-                    break;
-                }
-            }
-            if (page_index == std.math.maxInt(u32)) return;
-
-            // `id` does not reliably match the zip asset's uuid; the zip entry
-            // name is derived from `uri`'s basename instead (see plan findings).
-            const basename = if (std.mem.lastIndexOfScalar(u8, uri, '/')) |i| uri[i + 1 ..] else uri;
-            const entry_name = try std.fmt.allocPrint(c.alloc, "note_image_{s}", .{basename});
-            if (c.archive.find(entry_name) == null) return; // asset missing from export, skip gracefully
-
-            const bounds = readBounds(c.db, row, hdr, 9);
-            const creation_time = readColumnI64(c.db, row, hdr, 7);
-            try c.out.append(.{ .page_index = page_index, .bounds = bounds, .zip_entry_name = entry_name, .creation_time = creation_time });
-        }
-    }.f;
-    try btree.scanTable(db, root, *Ctx, &ctx, visit);
-    return ctx.out.toOwnedSlice();
 }
 
-fn scanLinks(alloc: std.mem.Allocator, db: pager.Db, pages: []const Page) ![]LinkAsset {
-    const root = (try schema.findTableRoot(db, "HyperLinkEntity")) orelse return Error.TableNotFound;
+const ImageCtx = struct { archive: ZipArchive, map: *const std.StringHashMap(u32), pages: []Page };
+const LinkCtx  = struct { map: *const std.StringHashMap(u32), pages: []Page };
+const AudioCtx = struct { archive: ZipArchive };
 
-    const Ctx = struct {
+/// Generic B-tree scanner shared by all three asset tables. `decodeFn`
+/// receives the caller-supplied context, allocator, db, and row; it returns
+/// `null` to skip a row or `T` to append it to the result slice.
+fn scanAssetTable(
+    comptime T: type,
+    alloc: std.mem.Allocator,
+    db: pager.Db,
+    table_name: []const u8,
+    decode_ctx: anytype,
+    comptime decodeFn: fn(@TypeOf(decode_ctx), std.mem.Allocator, pager.Db, btree.Row) anyerror!?T,
+) ![]T {
+    const root = (try schema.findTableRoot(db, table_name)) orelse return Error.TableNotFound;
+    const WalkCtx = struct {
+        ctx: @TypeOf(decode_ctx),
         alloc: std.mem.Allocator,
         db: pager.Db,
-        pages: []const Page,
-        out: std.array_list.Managed(LinkAsset),
+        out: std.array_list.Managed(T),
     };
-    var ctx = Ctx{ .alloc = alloc, .db = db, .pages = pages, .out = std.array_list.Managed(LinkAsset).init(alloc) };
-
+    var walk = WalkCtx{
+        .ctx = decode_ctx,
+        .alloc = alloc,
+        .db = db,
+        .out = std.array_list.Managed(T).init(alloc),
+    };
     const visit = struct {
-        fn f(c: *Ctx, row: btree.Row) !void {
-            const hdr = try row.header();
-            // HyperLinkEntity: id, bounds(json, unused), page_id, type, destination,
-            // extras(json, unused), creation_time, last_modification_time, left, top, right, bottom
-            const page_id = try readColumn(c.alloc, c.db, row, hdr, 2);
-            var page_index: u32 = std.math.maxInt(u32);
-            for (c.pages, 0..) |p, i| {
-                if (std.mem.eql(u8, p.id, page_id)) {
-                    page_index = @intCast(i);
-                    break;
-                }
-            }
-            if (page_index == std.math.maxInt(u32)) return; // orphaned row
-
-            const link_type = readColumnI64(c.db, row, hdr, 3);
-            const destination = try readColumn(c.alloc, c.db, row, hdr, 4);
-            const creation_time = readColumnI64(c.db, row, hdr, 6);
-            const bounds = readBounds(c.db, row, hdr, 8);
-            try c.out.append(.{ .page_index = page_index, .bounds = bounds, .destination = destination, .link_type = link_type, .creation_time = creation_time });
+        fn f(w: *WalkCtx, row: btree.Row) !void {
+            if (try decodeFn(w.ctx, w.alloc, w.db, row)) |item| try w.out.append(item);
         }
     }.f;
-    try btree.scanTable(db, root, *Ctx, &ctx, visit);
-    return ctx.out.toOwnedSlice();
+    try btree.scanTable(db, root, *WalkCtx, &walk, visit);
+    return walk.out.toOwnedSlice();
 }
 
-fn scanAudio(alloc: std.mem.Allocator, db: pager.Db, archive: zip.Archive) ![]AudioAsset {
-    const root = (try schema.findTableRoot(db, "AudioFileEntity")) orelse return Error.TableNotFound;
-
-    const Ctx = struct {
-        alloc: std.mem.Allocator,
-        db: pager.Db,
-        archive: zip.Archive,
-        out: std.array_list.Managed(AudioAsset),
+// ImageEntity: id, uri, layer, layer_id, bounds, rotation, page_id,
+// creation_time, last_modification_time, left, top, right, bottom, fixed
+fn decodeImage(ctx: ImageCtx, alloc: std.mem.Allocator, db: pager.Db, row: btree.Row) !?ImageAsset {
+    const hdr = try row.header();
+    const uri = try readColumn(alloc, db, row, hdr, 1);
+    const page_id = try readColumn(alloc, db, row, hdr, 6);
+    const page_index = ctx.map.get(page_id) orelse return null;
+    // `id` does not reliably match the zip asset's uuid; the zip entry
+    // name is derived from `uri`'s basename instead (see plan findings).
+    const basename = if (std.mem.lastIndexOfScalar(u8, uri, '/')) |i| uri[i + 1 ..] else uri;
+    const entry_name = try std.fmt.allocPrint(alloc, "note_image_{s}", .{basename});
+    if (ctx.archive.find(entry_name) == null) return null; // asset missing from export, skip gracefully
+    return .{
+        .page_index = page_index,
+        .bounds = readBoundsTracked(db, row, hdr, 9, ctx.pages, page_index),
+        .zip_entry_name = entry_name,
+        .creation_time = readColumnI64(db, row, hdr, 7),
     };
-    var ctx = Ctx{ .alloc = alloc, .db = db, .archive = archive, .out = std.array_list.Managed(AudioAsset).init(alloc) };
+}
 
-    const visit = struct {
-        fn f(c: *Ctx, row: btree.Row) !void {
-            const hdr = try row.header();
-            // AudioFileEntity: id, file_path, audio_name, duration, play_speed, creation_time, last_modification_time
-            const file_path = try readColumn(c.alloc, c.db, row, hdr, 1);
-            const audio_name = try readColumn(c.alloc, c.db, row, hdr, 2);
-            const duration_ms = readColumnI64(c.db, row, hdr, 3);
-            const creation_time = readColumnI64(c.db, row, hdr, 5);
+// HyperLinkEntity: id, bounds(json, unused), page_id, type, destination,
+// extras(json, unused), creation_time, last_modification_time, left, top, right, bottom
+fn decodeLink(ctx: LinkCtx, alloc: std.mem.Allocator, db: pager.Db, row: btree.Row) !?LinkAsset {
+    const hdr = try row.header();
+    const page_id = try readColumn(alloc, db, row, hdr, 2);
+    const page_index = ctx.map.get(page_id) orelse return null; // orphaned row
+    return .{
+        .page_index = page_index,
+        .bounds = readBoundsTracked(db, row, hdr, 8, ctx.pages, page_index),
+        .destination = try readColumn(alloc, db, row, hdr, 4),
+        .link_type = readColumnI64(db, row, hdr, 3),
+        .creation_time = readColumnI64(db, row, hdr, 6),
+    };
+}
 
-            // Zip entry name is derived from file_path's basename, same
-            // pattern as ImageEntity.uri.
-            const basename = if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |i| file_path[i + 1 ..] else file_path;
-            const entry_name = try std.fmt.allocPrint(c.alloc, "note_audio_{s}", .{basename});
-            if (c.archive.find(entry_name) == null) return; // asset missing from export, skip gracefully
-
-            try c.out.append(.{ .name = audio_name, .zip_entry_name = entry_name, .duration_ms = duration_ms, .creation_time = creation_time });
-        }
-    }.f;
-    try btree.scanTable(db, root, *Ctx, &ctx, visit);
-    return ctx.out.toOwnedSlice();
+// AudioFileEntity: id, file_path, audio_name, duration, play_speed, creation_time, last_modification_time
+// Zip entry name is derived from file_path's basename, same pattern as ImageEntity.uri.
+fn decodeAudio(ctx: AudioCtx, alloc: std.mem.Allocator, db: pager.Db, row: btree.Row) !?AudioAsset {
+    const hdr = try row.header();
+    const file_path = try readColumn(alloc, db, row, hdr, 1);
+    const audio_name = try readColumn(alloc, db, row, hdr, 2);
+    const basename = if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |i| file_path[i + 1 ..] else file_path;
+    const entry_name = try std.fmt.allocPrint(alloc, "note_audio_{s}", .{basename});
+    if (ctx.archive.find(entry_name) == null) return null; // asset missing from export, skip gracefully
+    return .{
+        .name = audio_name,
+        .zip_entry_name = entry_name,
+        .duration_ms = readColumnI64(db, row, hdr, 3),
+        .creation_time = readColumnI64(db, row, hdr, 5),
+    };
 }

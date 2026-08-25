@@ -3,9 +3,13 @@ const model = @import("model.zig");
 const window = @import("window.zig");
 const raster = @import("raster.zig");
 const tessellate = @import("tessellate.zig");
-const zip = @import("zip.zig");
-const zip_writer = @import("zip_writer.zig");
+const zipper = @import("zipper.zig");
 const big_alloc = @import("big_alloc.zig");
+const util = @import("util.zig");
+const gridCellIndex = util.gridCellIndex;
+const intersects = util.intersects;
+const extOf = util.extOf;
+const sanitizeInto = util.sanitizeInto;
 
 var g_panic_buf: [512]u8 = undefined;
 var g_panic_len: u32 = 0;
@@ -90,26 +94,17 @@ const LinkDraw = extern struct { creation_time: f64, left: f32, top: f32, right:
 // stride 32: f64 creation_time, f64 duration_ms, u32 name_ptr, u32 name_len, u32 entry_ptr, u32 entry_len
 const AudioDraw = extern struct { creation_time: f64, duration_ms: f64, name_ptr: u32, name_len: u32, entry_ptr: u32, entry_len: u32 };
 
-/// Allocates `len` bytes in wasm linear memory for the caller (JS) to write
-/// into before calling `set_active_window` or `get_bytes` (small, transient
-/// buffers -- uses the general-purpose allocator).
+/// Allocates `len` bytes in wasm memory and returns a pointer to it, or 0 on
+/// failure. Uses `big_alloc` for large requests (>64 KiB) to avoid wasm
+/// page-size class waste; all callers (JS and Zig) should use this.
 export fn alloc(len: u32) u32 {
-    const mem = gpa.alloc(u8, len) catch return 0;
-    return @intFromPtr(mem.ptr);
-}
-
-/// Same as `alloc`, but for the one big long-lived buffer per note load: the
-/// uploaded `.in` file's raw bytes, written here before calling `open`. Uses
-/// `big_alloc` (see its doc comment) instead of the general-purpose
-/// allocator, which would round this (often 10s-100s of MB) allocation up
-/// to the next power-of-two size class.
-export fn alloc_big(len: u32) u32 {
-    const mem = big_alloc.allocator.alloc(u8, len) catch return 0;
+    const allocator = if (len > 64 * 1024) big_alloc.allocator else gpa;
+    const mem = allocator.alloc(u8, len) catch return 0;
     return @intFromPtr(mem.ptr);
 }
 
 /// Parses a `.in` file (already written into wasm memory at `ptr`, `len`
-/// bytes, via `alloc_big`) into the active note. Returns 0 on success,
+/// bytes, via `alloc`) into the active note. Returns 0 on success,
 /// negative on failure. Replaces any previously loaded note.
 export fn open(ptr: u32, len: u32) i32 {
     if (g_state) |*s| {
@@ -298,13 +293,6 @@ fn collectVisibleOrder(content: window.PageContent, cull: model.Bounds, time_min
     }
 }
 
-fn gridCellIndex(world: f32, min: f32, cell_size: f32, n: u32) u32 {
-    const f = (world - min) / cell_size;
-    if (f <= 0) return 0;
-    const fi: u32 = @intFromFloat(@floor(f));
-    return @min(fi, n - 1);
-}
-
 /// Returns the strokes+shapes intersecting the world-space viewport rect AND
 /// creation_time range as vector polygon outlines (SVG/vector export), not
 /// rasterized pixels -- each stroke becomes one filled polygon (the same
@@ -371,10 +359,6 @@ export fn get_vector_content_poly_ptr() u32 {
 
 export fn get_vector_content_vertex_ptr() u32 {
     return @intFromPtr(g_vector_vertex_buf.ptr);
-}
-
-fn intersects(a: model.Bounds, b: model.Bounds) bool {
-    return a.left <= b.right and a.right >= b.left and a.top <= b.bottom and a.bottom >= b.top;
 }
 
 export fn get_visible_image_count(page_index: u32, x: f32, y: f32, w: f32, h: f32) u32 {
@@ -523,24 +507,8 @@ export fn get_all_audio_ptr() u32 {
     return @intFromPtr(g_audio_draw_buf.ptr);
 }
 
-fn extOf(name: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, name, '.')) |i| return name[i + 1 ..];
-    return "bin";
-}
-
-/// Copies `src` into `dst`, replacing any byte that isn't alphanumeric/`.`/
-/// `-`/`_` with `_` (keeps a display name usable as a zip entry path).
-/// Returns the copied length (truncated to `dst.len` if `src` is longer).
-fn sanitizeInto(dst: []u8, src: []const u8) usize {
-    const n = @min(dst.len, src.len);
-    for (src[0..n], 0..) |c, i| {
-        dst[i] = if (std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_') c else '_';
-    }
-    return n;
-}
-
 /// Builds a zip bundling every image and audio recording in the note
-/// (images/ and audio/ folders, stored uncompressed -- see zip_writer.zig)
+/// (images/ and audio/ folders, stored uncompressed -- see zipper.zig)
 /// and stashes it for get_media_zip_ptr(). Returns the zip's byte length,
 /// or 0 on failure/no note loaded.
 export fn build_media_zip() u32 {
@@ -549,7 +517,7 @@ export fn build_media_zip() u32 {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var entries = std.array_list.Managed(zip_writer.Entry).init(a);
+    var entries = std.array_list.Managed(zipper.StoredEntry).init(a);
 
     for (s.note.images, 0..) |img, i| {
         const src_entry = s.note.archive.find(img.zip_entry_name) orelse continue;
@@ -567,7 +535,7 @@ export fn build_media_zip() u32 {
         entries.append(.{ .name = name, .data = data }) catch continue;
     }
 
-    const zip_bytes = zip_writer.writeStoredZip(gpa, entries.items) catch return 0;
+    const zip_bytes = zipper.writeStoredZip(gpa, entries.items) catch return 0;
     gpa.free(g_media_zip_buf);
     g_media_zip_buf = zip_bytes;
     return @intCast(g_media_zip_buf.len);

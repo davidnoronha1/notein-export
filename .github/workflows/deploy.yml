@@ -24,6 +24,9 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
       - name: Install web dependencies
         working-directory: web
         run: bun install --frozen-lockfile

@@ -19,12 +19,32 @@ pub const Canvas = struct {
         const g: u8 = @truncate(argb >> 8);
         const b: u8 = @truncate(argb);
         const a: u8 = @truncate(argb >> 24);
-        var i: usize = 0;
-        while (i < self.pixels.len) : (i += 4) {
-            self.pixels[i] = r;
-            self.pixels[i + 1] = g;
-            self.pixels[i + 2] = b;
-            self.pixels[i + 3] = a;
+
+        // SIMD: fill 4 bytes (one pixel) per vector store; 16-byte vectors
+        // do 4 pixels at once. `pixels` is always a multiple of 4, so no tail.
+        if (self.pixels.len == 0) return;
+        const Vec4 = @Vector(4, u8);
+        const Vec16 = @Vector(16, u8);
+        const pat4: Vec4 = .{ r, g, b, a };
+        const pat16: Vec16 = .{ r, g, b, a, r, g, b, a, r, g, b, a, r, g, b, a };
+
+        const n = self.pixels.len;
+        // Prefer 16-byte vectors when naturally aligned; fallback to 4-byte.
+        // Use align(1) to allow unaligned buffers (wasm linear memory may be).
+        if (@intFromPtr(self.pixels.ptr) % @alignOf(Vec16) == 0) {
+            const n16 = n / 16 * 16;
+            const vec_ptr = @as([*]align(1) Vec16, @ptrCast(self.pixels.ptr));
+            const vec_count = n16 / 16;
+            for (0..vec_count) |vi| vec_ptr[vi] = pat16;
+            // Handle remaining 0-12 bytes (always multiple of 4) with Vec4
+            const remaining = n - n16;
+            if (remaining > 0) {
+                const vec4_ptr = @as([*]align(1) Vec4, @ptrCast(self.pixels.ptr + n16));
+                for (0..remaining / 4) |vi| vec4_ptr[vi] = pat4;
+            }
+        } else {
+            const vec_ptr = @as([*]align(1) Vec4, @ptrCast(self.pixels.ptr));
+            for (0..n / 4) |vi| vec_ptr[vi] = pat4;
         }
     }
 
@@ -71,16 +91,19 @@ pub const Canvas = struct {
     fn fillPolygon(self: Canvas, poly: []const [2]f32, argb: u32) void {
         if (poly.len < 3) return;
 
-        var min_x: f32 = poly[0][0];
-        var max_x: f32 = poly[0][0];
-        var min_y: f32 = poly[0][1];
-        var max_y: f32 = poly[0][1];
-        for (poly) |p| {
-            min_x = @min(min_x, p[0]);
-            max_x = @max(max_x, p[0]);
-            min_y = @min(min_y, p[1]);
-            max_y = @max(max_y, p[1]);
+        // SIMD: 2-wide vector for x/y min/max across poly
+        const Vec2 = @Vector(2, f32);
+        var mins: Vec2 = .{ poly[0][0], poly[0][1] };
+        var maxs: Vec2 = mins;
+        for (poly[1..]) |p| {
+            const v: Vec2 = .{ p[0], p[1] };
+            mins = @min(mins, v);
+            maxs = @max(maxs, v);
         }
+        const min_x = mins[0];
+        const max_x = maxs[0];
+        const min_y = mins[1];
+        const max_y = maxs[1];
         const pmin_y = self.toPixel(0, min_y)[1];
         const pmax_y = self.toPixel(0, max_y)[1];
         const y0: i32 = @max(0, @as(i32, @intFromFloat(@floor(pmin_y))));
@@ -225,9 +248,23 @@ fn addSpanCoverage(coverage: []f32, x0: f32, x1: f32, weight: f32) void {
     if (ix0 >= 0 and ix0 < coverage.len) {
         coverage[@intCast(ix0)] += (@as(f32, @floatFromInt(ix0 + 1)) - cx0) * weight;
     }
+    // SIMD: 8-wide vector add for the interior span (most pixels are interior)
     var ix = ix0 + 1;
-    while (ix < ix1) : (ix += 1) {
-        if (ix >= 0 and ix < coverage.len) coverage[@intCast(ix)] += weight;
+    if (ix < ix1) {
+        const w8: @Vector(8, f32) = @splat(weight);
+        // Vectorized chunk: 8 f32 (32 bytes) per iteration. Use align(1) to allow
+        // any coverage offset (wasm linear memory may be unaligned for Vec8).
+        while (ix + 8 <= ix1) : (ix += 8) {
+            // ix is guaranteed in [0, coverage.len) due to clamped cx0/cx1
+            const base: usize = @intCast(ix);
+            // Safety: base+8 <= coverage.len because ix+8 <= ix1 <= coverage.len
+            var vec: @Vector(8, f32) = coverage[base..][0..8].*;
+            vec += w8;
+            coverage[base..][0..8].* = vec;
+        }
+        while (ix < ix1) : (ix += 1) {
+            coverage[@intCast(ix)] += weight;
+        }
     }
     if (ix1 >= 0 and ix1 < coverage.len) {
         coverage[@intCast(ix1)] += (cx1 - @as(f32, @floatFromInt(ix1))) * weight;
