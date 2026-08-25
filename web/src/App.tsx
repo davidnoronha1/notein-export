@@ -4,7 +4,7 @@ import { app } from "./controller";
 import { CloseIcon, PlusIcon, MinusIcon } from "./icons";
 import { MediaToggleButton, MediaPanel } from "./media-panel";
 import { LinksToggleButton, LinksPanel } from "./links-panel";
-import { HelpToggleButton, HelpPanel } from "./help-panel";
+import { HelpToggleButton } from "./help-panel";
 
 const exportScale = signal<ExportScale>(4);
 
@@ -184,7 +184,6 @@ export function App() {
         <ExportPanel />
         <MediaPanel />
         <LinksPanel />
-        <HelpPanel />
         <ZoomControl />
         <HelpToggleButton />
       </div>
