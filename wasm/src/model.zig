@@ -43,6 +43,23 @@ pub const ImageAsset = struct {
     creation_time: i64,
 };
 
+pub const LinkAsset = struct {
+    page_index: u32,
+    bounds: Bounds,
+    destination: []const u8,
+    link_type: i64,
+    creation_time: i64,
+};
+
+pub const AudioAsset = struct {
+    /// Display name (AudioFileEntity.audio_name), e.g. "Recording 1".
+    name: []const u8,
+    /// Zip entry name, resolved at load time like ImageAsset.zip_entry_name.
+    zip_entry_name: []const u8,
+    duration_ms: i64,
+    creation_time: i64,
+};
+
 pub const Note = struct {
     alloc: std.mem.Allocator,
     archive: zip.Archive,
@@ -53,6 +70,8 @@ pub const Note = struct {
     shapes: []ShapeEntry,
     text_boxes: []TextBoxEntry,
     images: []ImageAsset,
+    links: []LinkAsset,
+    audio: []AudioAsset,
 
     pub fn pageIndexOf(self: Note, id: []const u8) ?u32 {
         for (self.pages, 0..) |p, i| {
@@ -278,6 +297,8 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
     const shapes = try scanIndexedTable(Empty, alloc, db, "ShapeEntity", pages, 1, 12);
     const text_boxes = try scanIndexedTable(Empty, alloc, db, "TextBoxEntity", pages, 1, 14);
     const images = try scanImages(alloc, db, archive, pages);
+    const links = try scanLinks(alloc, db, pages);
+    const audio = try scanAudio(alloc, db, archive);
 
     return .{
         .alloc = alloc,
@@ -288,6 +309,8 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
         .shapes = shapes,
         .text_boxes = text_boxes,
         .images = images,
+        .links = links,
+        .audio = audio,
     };
 }
 
@@ -389,6 +412,76 @@ fn scanImages(alloc: std.mem.Allocator, db: pager.Db, archive: zip.Archive, page
             const bounds = readBounds(c.db, row, hdr, 9);
             const creation_time = readColumnI64(c.db, row, hdr, 7);
             try c.out.append(.{ .page_index = page_index, .bounds = bounds, .zip_entry_name = entry_name, .creation_time = creation_time });
+        }
+    }.f;
+    try btree.scanTable(db, root, *Ctx, &ctx, visit);
+    return ctx.out.toOwnedSlice();
+}
+
+fn scanLinks(alloc: std.mem.Allocator, db: pager.Db, pages: []const Page) ![]LinkAsset {
+    const root = (try schema.findTableRoot(db, "HyperLinkEntity")) orelse return Error.TableNotFound;
+
+    const Ctx = struct {
+        alloc: std.mem.Allocator,
+        db: pager.Db,
+        pages: []const Page,
+        out: std.array_list.Managed(LinkAsset),
+    };
+    var ctx = Ctx{ .alloc = alloc, .db = db, .pages = pages, .out = std.array_list.Managed(LinkAsset).init(alloc) };
+
+    const visit = struct {
+        fn f(c: *Ctx, row: btree.Row) !void {
+            const hdr = try row.header();
+            // HyperLinkEntity: id, bounds(json, unused), page_id, type, destination,
+            // extras(json, unused), creation_time, last_modification_time, left, top, right, bottom
+            const page_id = try readColumn(c.alloc, c.db, row, hdr, 2);
+            var page_index: u32 = std.math.maxInt(u32);
+            for (c.pages, 0..) |p, i| {
+                if (std.mem.eql(u8, p.id, page_id)) {
+                    page_index = @intCast(i);
+                    break;
+                }
+            }
+            if (page_index == std.math.maxInt(u32)) return; // orphaned row
+
+            const link_type = readColumnI64(c.db, row, hdr, 3);
+            const destination = try readColumn(c.alloc, c.db, row, hdr, 4);
+            const creation_time = readColumnI64(c.db, row, hdr, 6);
+            const bounds = readBounds(c.db, row, hdr, 8);
+            try c.out.append(.{ .page_index = page_index, .bounds = bounds, .destination = destination, .link_type = link_type, .creation_time = creation_time });
+        }
+    }.f;
+    try btree.scanTable(db, root, *Ctx, &ctx, visit);
+    return ctx.out.toOwnedSlice();
+}
+
+fn scanAudio(alloc: std.mem.Allocator, db: pager.Db, archive: zip.Archive) ![]AudioAsset {
+    const root = (try schema.findTableRoot(db, "AudioFileEntity")) orelse return Error.TableNotFound;
+
+    const Ctx = struct {
+        alloc: std.mem.Allocator,
+        db: pager.Db,
+        archive: zip.Archive,
+        out: std.array_list.Managed(AudioAsset),
+    };
+    var ctx = Ctx{ .alloc = alloc, .db = db, .archive = archive, .out = std.array_list.Managed(AudioAsset).init(alloc) };
+
+    const visit = struct {
+        fn f(c: *Ctx, row: btree.Row) !void {
+            const hdr = try row.header();
+            // AudioFileEntity: id, file_path, audio_name, duration, play_speed, creation_time, last_modification_time
+            const file_path = try readColumn(c.alloc, c.db, row, hdr, 1);
+            const audio_name = try readColumn(c.alloc, c.db, row, hdr, 2);
+            const duration_ms = readColumnI64(c.db, row, hdr, 3);
+            const creation_time = readColumnI64(c.db, row, hdr, 5);
+
+            // Zip entry name is derived from file_path's basename, same
+            // pattern as ImageEntity.uri.
+            const basename = if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |i| file_path[i + 1 ..] else file_path;
+            const entry_name = try std.fmt.allocPrint(c.alloc, "note_audio_{s}", .{basename});
+            if (c.archive.find(entry_name) == null) return; // asset missing from export, skip gracefully
+
+            try c.out.append(.{ .name = audio_name, .zip_entry_name = entry_name, .duration_ms = duration_ms, .creation_time = creation_time });
         }
     }.f;
     try btree.scanTable(db, root, *Ctx, &ctx, visit);

@@ -52,6 +52,8 @@ test "diary.in: row counts match known sample values" {
         .{ .table = "ShapeEntity", .count = 344 },
         .{ .table = "TextBoxEntity", .count = 12 },
         .{ .table = "NoteContentEntity", .count = 2 },
+        .{ .table = "HyperLinkEntity", .count = 0 },
+        .{ .table = "AudioFileEntity", .count = 1 },
     };
 
     for (expectations) |exp| {

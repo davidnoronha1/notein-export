@@ -25,6 +25,8 @@ test "model.open: diary.in loads with expected shape" {
     try std.testing.expectEqual(@as(usize, 344), note.shapes.len);
     try std.testing.expectEqual(@as(usize, 12), note.text_boxes.len);
     try std.testing.expectEqual(@as(usize, 29), note.images.len);
+    try std.testing.expectEqual(@as(usize, 0), note.links.len);
+    try std.testing.expectEqual(@as(usize, 1), note.audio.len);
 
     // All pages should be A4-sized, bounded (per the sample's findings).
     for (note.pages) |p| {
@@ -38,6 +40,11 @@ test "model.open: diary.in loads with expected shape" {
     for (note.shapes) |s| try std.testing.expect(s.page_index < note.pages.len);
     for (note.text_boxes) |t| try std.testing.expect(t.page_index < note.pages.len);
     for (note.images) |img| try std.testing.expect(img.page_index < note.pages.len);
+    for (note.links) |l| try std.testing.expect(l.page_index < note.pages.len);
+    if (note.audio.len > 0) {
+        try std.testing.expect(note.audio[0].duration_ms > 0);
+        try std.testing.expect(note.audio[0].zip_entry_name.len > 0);
+    }
 
     // Spot check: bounds should be non-degenerate for at least most strokes.
     var nonzero_bounds: usize = 0;
