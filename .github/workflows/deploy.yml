@@ -1,0 +1,37 @@
+name: Deploy
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          # Pinned to the exact dev build this repo's wasm/build.zig is
+          # verified against locally. Zig's nightly index only retains
+          # recent builds, so if this version ever 404s, re-pin to the
+          # current `zig version` output after confirming `zig build test`
+          # still passes locally.
+          version: 0.17.0-dev.1859+dcceb318e
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install web dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Build (wasm + web)
+        working-directory: web
+        run: bun run build
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
