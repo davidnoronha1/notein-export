@@ -290,9 +290,13 @@ export class NoteinModule {
     return new Uint8Array(this.memory, dataPtr, dataLen).slice();
   }
 
+  // Zero-length Zig allocations return a dangling sentinel pointer (e.g.
+  // 0xFFFFFFF8), which JS reads as a large negative i32 -- DataView rejects
+  // that as an out-of-bounds offset. Short-circuit before touching *_ptr().
   /** All images in the note (not viewport-culled), for the Media panel. */
   getAllImages(): AssetImage[] {
     const count = this.exports.get_all_images_count();
+    if (count === 0) return [];
     const ptr = this.exports.get_all_images_ptr();
     const view = new DataView(this.memory, ptr, count * ASSET_IMAGE_STRIDE);
     const out: AssetImage[] = [];
@@ -316,6 +320,7 @@ export class NoteinModule {
   /** All hyperlinks in the note, for the Links panel. */
   getAllLinks(): LinkAsset[] {
     const count = this.exports.get_all_links_count();
+    if (count === 0) return [];
     const ptr = this.exports.get_all_links_ptr();
     const view = new DataView(this.memory, ptr, count * LINK_DRAW_STRIDE);
     const out: LinkAsset[] = [];
@@ -340,6 +345,7 @@ export class NoteinModule {
   /** All audio recordings in the note, for the Media panel's Audio tab. */
   getAllAudio(): AudioAsset[] {
     const count = this.exports.get_all_audio_count();
+    if (count === 0) return [];
     const ptr = this.exports.get_all_audio_ptr();
     const view = new DataView(this.memory, ptr, count * AUDIO_DRAW_STRIDE);
     const out: AudioAsset[] = [];

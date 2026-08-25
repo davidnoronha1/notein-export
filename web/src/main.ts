@@ -7,6 +7,8 @@ import type { WorldRect } from "./canvas/export-render";
 import { exportRegionPdf, exportRegionPng, exportRegionSvg, type ExportScale } from "./export";
 import { setupFileInput, hideDropZone, showDropZone } from "./file-input";
 import { formatStats } from "./stats";
+import { mountMediaPanel } from "./media-panel";
+import { mountLinksPanel } from "./links-panel";
 
 const statusEl = document.getElementById("status")!;
 const statsEl = document.getElementById("stats")!;
@@ -38,6 +40,10 @@ const exportRegionPngEl = document.getElementById("export-region-png") as HTMLBu
 const exportRegionPdfEl = document.getElementById("export-region-pdf") as HTMLButtonElement;
 const exportRegionSvgEl = document.getElementById("export-region-svg") as HTMLButtonElement;
 const exportRegionCancelEl = document.getElementById("export-region-cancel")!;
+const mediaToolRootEl = document.getElementById("media-tool-root")!;
+const mediaPanelRootEl = document.getElementById("media-panel-root")!;
+const linksToolRootEl = document.getElementById("links-tool-root")!;
+const linksPanelRootEl = document.getElementById("links-panel-root")!;
 
 function setStatus(text: string): void {
   statusEl.textContent = text;
@@ -142,6 +148,9 @@ async function main(): Promise<void> {
   });
 
   window.addEventListener("resize", () => renderer?.requestRender());
+
+  const mediaPanel = mountMediaPanel(mediaToolRootEl, mediaPanelRootEl, wasm, () => renderer?.layout ?? null, viewport, canvas);
+  const linksPanel = mountLinksPanel(linksToolRootEl, linksPanelRootEl, wasm, () => renderer?.layout ?? null, viewport, canvas);
 
   zoomSliderEl.addEventListener("input", () => {
     const rect = canvas.getBoundingClientRect();
@@ -335,6 +344,8 @@ async function main(): Promise<void> {
       exportControlEl.classList.remove("hidden");
       syncZoomUI();
       syncPageExportUI();
+      mediaPanel.reset();
+      linksPanel.reset();
       setStatus(`${file.name} — ${renderer.layout.pages.length} page(s)`);
     } catch (err) {
       console.error(err);
@@ -345,6 +356,8 @@ async function main(): Promise<void> {
       exportControlEl.classList.add("hidden");
       hideExportPanel();
       setSelectMode(false);
+      mediaPanel.reset();
+      linksPanel.reset();
     } finally {
       dropZoneEl.classList.remove("loading");
       dropMessageEl.innerHTML = dropMessageDefault;
