@@ -104,6 +104,8 @@ function currentPage(pages: PageLayout[], viewport: Viewport): PageLayout | null
 
 async function withDisabled(buttons: HTMLButtonElement[], fn: () => Promise<void>): Promise<void> {
   for (const b of buttons) b.disabled = true;
+  showProgress();
+  await nextPaint(); // let the progress bar actually paint before the export's main-thread-blocking render work
   try {
     await fn();
   } catch (err) {
@@ -111,6 +113,7 @@ async function withDisabled(buttons: HTMLButtonElement[], fn: () => Promise<void
     setStatus(`Export failed: ${(err as Error).message}`);
   } finally {
     for (const b of buttons) b.disabled = false;
+    hideProgress();
   }
 }
 
@@ -174,10 +177,7 @@ async function main(): Promise<void> {
     selectMode = on;
     selectToolEl.classList.toggle("active", on);
     selectionOverlayEl.classList.toggle("active", on);
-    if (!on) {
-      selectionRectEl.style.display = "none";
-      dragStart = null;
-    }
+    if (!on) dragStart = null;
   }
 
   function hideExportPanel(): void {
@@ -187,6 +187,7 @@ async function main(): Promise<void> {
 
   selectToolEl.addEventListener("click", () => {
     hideExportPanel();
+    selectionRectEl.style.display = "none";
     setSelectMode(!selectMode);
   });
 
@@ -356,6 +357,7 @@ async function main(): Promise<void> {
       exportControlEl.classList.add("hidden");
       hideExportPanel();
       setSelectMode(false);
+      selectionRectEl.style.display = "none";
       mediaPanel.reset();
       linksPanel.reset();
     } finally {

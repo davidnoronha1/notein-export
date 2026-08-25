@@ -7,6 +7,7 @@ import { frameToBounds } from "./canvas/layout";
 import type { Viewport } from "./canvas/viewport";
 import { sniffImageMime } from "./canvas/export-render";
 import { triggerDownload } from "./export";
+import { CloseIcon, DownloadIcon } from "./icons";
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.round(ms / 1000);
@@ -42,6 +43,17 @@ export function mountMediaPanel(
   const audio = signal<AudioAsset[]>([]);
   const loaded = signal(false);
   const activeTab = signal<"images" | "audio">("images");
+  const zipping = signal(false);
+
+  async function downloadAll(): Promise<void> {
+    zipping.value = true;
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let the "Zipping…" label paint before the blocking build
+    try {
+      triggerDownload(new Blob([wasm.getMediaZip().buffer as ArrayBuffer], { type: "application/zip" }), "notein-media.zip");
+    } finally {
+      zipping.value = false;
+    }
+  }
 
   function toggle(): void {
     if (!isOpen.value && !loaded.value) {
@@ -89,7 +101,7 @@ export function mountMediaPanel(
             triggerDownload(new Blob([bytes.buffer as ArrayBuffer], { type: sniffImageMime(bytes) }), img.name);
           }}
         >
-          ⬇
+          <DownloadIcon />
         </button>
       </div>
     );
@@ -112,7 +124,7 @@ export function mountMediaPanel(
         </span>
         {url && <audio controls src={url} />}
         <button type="button" onClick={() => triggerDownload(new Blob([wasm.getBytes(a.entryName).buffer as ArrayBuffer], { type: "audio/mp4" }), `${a.name}.${extOf(a.entryName)}`)}>
-          ⬇ Download
+          <DownloadIcon /> Download
         </button>
       </div>
     );
@@ -133,11 +145,11 @@ export function mountMediaPanel(
               Audio
             </button>
           </div>
-          <button type="button" disabled={!hasMedia} onClick={() => triggerDownload(new Blob([wasm.getMediaZip().buffer as ArrayBuffer], { type: "application/zip" }), "notein-media.zip")}>
-            Download all (zip)
+          <button type="button" disabled={!hasMedia || zipping.value} onClick={downloadAll}>
+            <DownloadIcon /> {zipping.value ? "Zipping…" : "Download all"}
           </button>
           <button type="button" aria-label="Close" onClick={() => (isOpen.value = false)}>
-            &times;
+            <CloseIcon />
           </button>
         </div>
         <div class={`side-panel-list ${tab === "images" ? "media-grid" : "media-list"}`}>

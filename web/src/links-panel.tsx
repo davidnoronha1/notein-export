@@ -4,6 +4,7 @@ import type { NoteinModule, LinkAsset } from "./wasm/loader";
 import type { NoteLayout } from "./canvas/layout";
 import { frameToBounds } from "./canvas/layout";
 import type { Viewport } from "./canvas/viewport";
+import { CloseIcon, ExternalLinkIcon, JumpIcon } from "./icons";
 
 function isHttpUrl(destination: string): boolean {
   return /^https?:\/\//i.test(destination);
@@ -58,11 +59,11 @@ export function mountLinksPanel(
               if (layout) frameToBounds(viewport, layout, link.pageIndex, link, canvas);
             }}
           >
-            Jump
+            <JumpIcon /> Jump
           </button>
           {isHttpUrl(link.destination) && (
             <a href={link.destination} target="_blank" rel="noopener">
-              Open ↗
+              <ExternalLinkIcon /> Open
             </a>
           )}
         </div>
@@ -77,7 +78,7 @@ export function mountLinksPanel(
         <div class="side-panel-header">
           <span class="side-panel-title">Links</span>
           <button type="button" aria-label="Close" onClick={() => (isOpen.value = false)}>
-            &times;
+            <CloseIcon />
           </button>
         </div>
         <div class="side-panel-list">

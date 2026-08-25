@@ -231,6 +231,11 @@
         color: #eee;
         cursor: pointer;
       }
+      #export-panel button {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
       #export-panel button:hover {
         background: #2a2a2a;
       }
@@ -270,6 +275,9 @@
         font-size: 13px;
       }
       .side-panel button {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
         font-size: 12px;
         padding: 5px 8px;
         border-radius: 8px;
@@ -278,6 +286,9 @@
         color: #eee;
         cursor: pointer;
         white-space: nowrap;
+      }
+      .side-panel button svg {
+        flex: 0 0 auto;
       }
       .side-panel button:hover {
         background: #2a2a2a;
@@ -350,6 +361,9 @@
         gap: 6px;
       }
       .media-row a {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
         font-size: 12px;
         padding: 5px 8px;
         border-radius: 8px;
@@ -382,15 +396,16 @@
         width: 140px;
       }
       #zoom-control button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
         width: 32px;
         height: 32px;
-        line-height: 1;
         padding: 0;
         border-radius: 50%;
         border: 1px solid #555;
         background: #1e1e1e;
         color: #eee;
-        font-size: 22px;
         cursor: pointer;
         flex: 0 0 auto;
       }
@@ -479,15 +494,29 @@
             <button id="export-region-png" type="button">Export PNG</button>
             <button id="export-region-pdf" type="button">Export PDF</button>
             <button id="export-region-svg" type="button">Export SVG</button>
-            <button id="export-region-cancel" type="button" aria-label="Cancel selection">&times;</button>
+            <button id="export-region-cancel" type="button" aria-label="Cancel selection">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6 6 18" />
+                <path d="M6 6l12 12" />
+              </svg>
+            </button>
           </div>
         </div>
         <div id="media-panel-root"></div>
         <div id="links-panel-root"></div>
         <div id="zoom-control" class="hidden">
-          <button id="zoom-out" type="button" aria-label="Zoom out">&minus;</button>
+          <button id="zoom-out" type="button" aria-label="Zoom out">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14" />
+            </svg>
+          </button>
           <input id="zoom-slider" type="range" min="0" max="100" step="0.5" value="50" />
-          <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+          <button id="zoom-in" type="button" aria-label="Zoom in">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 5v14" />
+              <path d="M5 12h14" />
+            </svg>
+          </button>
           <span id="zoom-label">100%</span>
         </div>
       </div>
