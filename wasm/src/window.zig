@@ -434,9 +434,10 @@ pub const Window = struct {
             }
         }.lessThan);
 
-        const grid = try buildGrid(self.alloc, order, strokes_slice, shapes_slice);
-        const seen = try self.alloc.alloc(u32, order.len);
-        @memset(seen, 0);
+        const is_unbounded = if (page_index < self.note.pages.len) self.note.pages[page_index].unbounded else false;
+        const grid = if (is_unbounded and order.len >= 32) try buildGrid(self.alloc, order, strokes_slice, shapes_slice) else Grid{};
+        const seen = if (grid.cols > 0) try self.alloc.alloc(u32, order.len) else @as([]u32, &.{});
+        if (grid.cols > 0) @memset(seen, 0);
 
         return .{
             .strokes = strokes_slice,
