@@ -1,4 +1,5 @@
 import type { ImageDraw, NoteinModule, TextBoxDraw } from "../wasm/loader";
+import { argbToCss } from "./color";
 import { layoutNote, visiblePages, type NoteLayout, type PageLayout } from "./layout";
 import type { Viewport } from "./viewport";
 import { FrameStats } from "../stats";
@@ -15,14 +16,6 @@ const PREFETCH_MARGIN_PAGES = 1;
 // flips back to false as soon as the gesture ends, at which point the very
 // next frame renders at full quality again.
 const INTERACTION_LOD_SCALE = 0.5;
-
-function argbToCss(argb: number): string {
-  const a = ((argb >>> 24) & 0xff) / 255;
-  const r = (argb >>> 16) & 0xff;
-  const g = (argb >>> 8) & 0xff;
-  const b = argb & 0xff;
-  return `rgba(${r}, ${g}, ${b}, ${a})`;
-}
 
 export class Renderer {
   readonly layout: NoteLayout;
@@ -149,7 +142,6 @@ export class Renderer {
     canvasWidthPx: number,
     canvasHeightPx: number,
   ): void {
-    // Intersection of the page box and the viewport, in world space.
     const boxX = page.x + page.boxLeft;
     const boxY = page.y + page.boxTop;
     const vx0 = Math.max(boxX, camera.x);
@@ -172,11 +164,9 @@ export class Renderer {
     const pixelW = Math.max(1, Math.round(vw * inkPxPerUnit));
     const pixelH = Math.max(1, Math.round(vh * inkPxPerUnit));
 
-    // Screen position (device pixels) of this rasterized rect's top-left.
     const screenX = (vx0 - camera.x) * devicePxPerUnit;
     const screenY = (vy0 - camera.y) * devicePxPerUnit;
 
-    // Page background (paper) first, using the note's real paper color.
     if (!page.unbounded) {
       this.ctx.fillStyle = argbToCss(page.color);
       this.ctx.fillRect(screenX, screenY, destW, destH);

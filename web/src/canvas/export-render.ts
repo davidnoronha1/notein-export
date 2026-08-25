@@ -1,5 +1,7 @@
 import type { ImageDraw, NoteinModule, TextBoxDraw, VectorPoly } from "../wasm/loader";
+import { argbToCss } from "./color";
 import { visiblePages, type NoteLayout, type PageLayout } from "./layout";
+import { bytesToBase64, xmlEscape } from "../util";
 
 export interface WorldRect {
   x: number;
@@ -9,14 +11,6 @@ export interface WorldRect {
 }
 
 type Overlay = ({ kind: "image"; item: ImageDraw } | { kind: "text"; item: TextBoxDraw }) & { creationTime: number };
-
-function argbToCss(argb: number): string {
-  const a = ((argb >>> 24) & 0xff) / 255;
-  const r = (argb >>> 16) & 0xff;
-  const g = (argb >>> 8) & 0xff;
-  const b = argb & 0xff;
-  return `rgba(${r}, ${g}, ${b}, ${a})`;
-}
 
 /**
  * Renders a note-space world rect (which may span multiple stacked pages,
@@ -194,10 +188,6 @@ type SvgOverlay =
   | { kind: "image"; creationTime: number; item: ImageDraw }
   | { kind: "text"; creationTime: number; item: TextBoxDraw };
 
-function xmlEscape(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
 /** Sniffs an image asset's magic bytes for its MIME type -- the zip entries
  * are raw photo/image bytes with no type stored alongside them elsewhere. */
 export function sniffImageMime(bytes: Uint8Array): string {
@@ -205,15 +195,6 @@ export function sniffImageMime(bytes: Uint8Array): string {
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
   if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "image/gif";
   return "image/png";
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
 }
 
 /**

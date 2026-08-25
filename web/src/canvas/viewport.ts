@@ -1,3 +1,5 @@
+import { clamp } from "../util";
+
 export interface Camera {
   x: number; // world-space top-left of the viewport
   y: number;
@@ -181,8 +183,4 @@ export class Viewport {
     const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
     return { x: cx - rect.left, y: cy - rect.top };
   }
-}
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, v));
 }

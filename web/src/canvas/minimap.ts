@@ -1,4 +1,5 @@
 import type { NoteinModule } from "../wasm/loader";
+import { argbToCss } from "./color";
 import type { NoteLayout, PageLayout } from "./layout";
 import type { Viewport } from "./viewport";
 
@@ -8,14 +9,6 @@ const THUMB_WIDTH = 96;
 // pixels wide so the minimap still reads as legible ink instead of blank.
 const THUMB_MIN_STROKE_PX = 1.25;
 const MIN_INDICATOR_PX = 4;
-
-function argbToCss(argb: number): string {
-  const a = ((argb >>> 24) & 0xff) / 255;
-  const r = (argb >>> 16) & 0xff;
-  const g = (argb >>> 8) & 0xff;
-  const b = argb & 0xff;
-  return `rgba(${r}, ${g}, ${b}, ${a})`;
-}
 
 interface WorldRect {
   left: number;
@@ -61,6 +54,7 @@ export class Minimap {
   private freeCanvas: HTMLCanvasElement | null = null;
 
   constructor(
+    container: HTMLElement,
     private readonly wasm: NoteinModule,
     private readonly layout: NoteLayout,
     private readonly viewport: Viewport,
@@ -72,9 +66,7 @@ export class Minimap {
   ) {
     this.freeform = layout.pages.some((p) => p.unbounded);
 
-    const container = document.getElementById("minimap")!;
     container.innerHTML = "";
-    container.classList.remove("hidden");
     this.container = container;
 
     this.track = document.createElement("div");
@@ -100,9 +92,7 @@ export class Minimap {
     }
   }
 
-  // ------------------------------------------------------------------
-  // Freeform (infinite-canvas) mode
-  // ------------------------------------------------------------------
+  // -- Freeform (infinite-canvas) mode --------------------------------
 
   private buildFreeCanvas(): void {
     let left = Infinity;
@@ -238,9 +228,7 @@ export class Minimap {
     this.indicator.style.height = `${height}px`;
   }
 
-  // ------------------------------------------------------------------
-  // Paginated mode (unchanged behavior, vertical page stack)
-  // ------------------------------------------------------------------
+  // -- Paginated mode: vertical page stack -----------------------------
 
   private buildThumbnails(): void {
     let top = 0;
@@ -260,7 +248,7 @@ export class Minimap {
       this.track.appendChild(wrap);
 
       this.pageTops.push(top);
-      top += thumbHeight + 4; // small gap between thumbnails, mirrors PAGE_GAP visually
+      top += thumbHeight + 4; // mirrors PAGE_GAP visually
 
       this.scheduleGenerate(page.index, canvas, thumbHeight);
     }
@@ -393,8 +381,6 @@ export class Minimap {
       this.container.scrollTop = top + height / 2 - this.container.clientHeight / 2;
     }
   }
-
-  // ------------------------------------------------------------------
 
   private loadImage(name: string, dw: number, dh: number, onLoaded: () => void): void {
     const bytes = this.wasm.getBytes(name);
