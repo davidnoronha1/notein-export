@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
           # This repo relies on very recent std APIs (std.array_list.Managed,
           # std.Io.Dir, ...) that only exist on Zig's nightly master branch --
