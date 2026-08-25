@@ -7,7 +7,6 @@ import { frameToBounds } from "./canvas/layout";
 import type { Viewport } from "./canvas/viewport";
 import { sniffImageMime } from "./canvas/export-render";
 import { triggerDownload } from "./export";
-import { downloadAllMedia } from "./media-zip";
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.round(ms / 1000);
@@ -134,7 +133,7 @@ export function mountMediaPanel(
               Audio
             </button>
           </div>
-          <button type="button" disabled={!hasMedia} onClick={() => downloadAllMedia(wasm, images.value, audio.value)}>
+          <button type="button" disabled={!hasMedia} onClick={() => triggerDownload(new Blob([wasm.getMediaZip().buffer as ArrayBuffer], { type: "application/zip" }), "notein-media.zip")}>
             Download all (zip)
           </button>
           <button type="button" aria-label="Close" onClick={() => (isOpen.value = false)}>

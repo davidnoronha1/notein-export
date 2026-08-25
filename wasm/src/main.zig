@@ -3,6 +3,7 @@ const model = @import("model.zig");
 const window = @import("window.zig");
 const raster = @import("raster.zig");
 const zip = @import("zip.zig");
+const zip_writer = @import("zip_writer.zig");
 const big_alloc = @import("big_alloc.zig");
 
 var g_panic_buf: [512]u8 = undefined;
@@ -43,6 +44,7 @@ var g_vector_vertex_buf: []f32 = &.{}; // flat x0,y0,x1,y1,... pairs, indexed by
 var g_asset_image_buf: []AssetImageDraw = &.{};
 var g_link_draw_buf: []LinkDraw = &.{};
 var g_audio_draw_buf: []AudioDraw = &.{};
+var g_media_zip_buf: []u8 = &.{};
 
 const PageInfo = extern struct { width: f32, height: f32, unbounded: u32, color: u32 };
 // creation_time is epoch milliseconds (fits exactly in f64's 53-bit mantissa,
@@ -421,4 +423,58 @@ export fn get_all_audio_count() u32 {
 
 export fn get_all_audio_ptr() u32 {
     return @intFromPtr(g_audio_draw_buf.ptr);
+}
+
+fn extOf(name: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, name, '.')) |i| return name[i + 1 ..];
+    return "bin";
+}
+
+/// Copies `src` into `dst`, replacing any byte that isn't alphanumeric/`.`/
+/// `-`/`_` with `_` (keeps a display name usable as a zip entry path).
+/// Returns the copied length (truncated to `dst.len` if `src` is longer).
+fn sanitizeInto(dst: []u8, src: []const u8) usize {
+    const n = @min(dst.len, src.len);
+    for (src[0..n], 0..) |c, i| {
+        dst[i] = if (std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_') c else '_';
+    }
+    return n;
+}
+
+/// Builds a zip bundling every image and audio recording in the note
+/// (images/ and audio/ folders, stored uncompressed -- see zip_writer.zig)
+/// and stashes it for get_media_zip_ptr(). Returns the zip's byte length,
+/// or 0 on failure/no note loaded.
+export fn build_media_zip() u32 {
+    const s = &(g_state orelse return 0);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var entries = std.array_list.Managed(zip_writer.Entry).init(a);
+
+    for (s.note.images, 0..) |img, i| {
+        const src_entry = s.note.archive.find(img.zip_entry_name) orelse continue;
+        const data = s.note.archive.extract(a, src_entry) catch continue;
+        const name = std.fmt.allocPrint(a, "images/image-{d:0>3}.{s}", .{ i + 1, extOf(img.zip_entry_name) }) catch continue;
+        entries.append(.{ .name = name, .data = data }) catch continue;
+    }
+
+    for (s.note.audio, 0..) |aud, i| {
+        const src_entry = s.note.archive.find(aud.zip_entry_name) orelse continue;
+        const data = s.note.archive.extract(a, src_entry) catch continue;
+        var safe_buf: [128]u8 = undefined;
+        const safe_len = sanitizeInto(&safe_buf, aud.name);
+        const name = std.fmt.allocPrint(a, "audio/audio-{d:0>3}-{s}.{s}", .{ i + 1, safe_buf[0..safe_len], extOf(aud.zip_entry_name) }) catch continue;
+        entries.append(.{ .name = name, .data = data }) catch continue;
+    }
+
+    const zip_bytes = zip_writer.writeStoredZip(gpa, entries.items) catch return 0;
+    gpa.free(g_media_zip_buf);
+    g_media_zip_buf = zip_bytes;
+    return @intCast(g_media_zip_buf.len);
+}
+
+export fn get_media_zip_ptr() u32 {
+    return @intFromPtr(g_media_zip_buf.ptr);
 }

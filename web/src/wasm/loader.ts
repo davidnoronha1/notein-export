@@ -36,6 +36,8 @@ interface NoteinExports {
   get_all_links_ptr(): number;
   get_all_audio_count(): number;
   get_all_audio_ptr(): number;
+  build_media_zip(): number;
+  get_media_zip_ptr(): number;
   get_vector_content_count(pageIndex: number, x: number, y: number, w: number, h: number, timeMin: number, timeMax: number): number;
   get_vector_content_poly_ptr(): number;
   get_vector_content_vertex_ptr(): number;
@@ -363,5 +365,15 @@ export class NoteinModule {
       });
     }
     return out;
+  }
+
+  /** Builds a zip bundling every image and audio recording in the note
+   * (images/ and audio/ folders, stored uncompressed) entirely in wasm --
+   * see wasm/src/zip_writer.zig. */
+  getMediaZip(): Uint8Array {
+    const len = this.exports.build_media_zip();
+    if (len === 0) return new Uint8Array(0);
+    const ptr = this.exports.get_media_zip_ptr();
+    return new Uint8Array(this.memory, ptr, len).slice();
   }
 }

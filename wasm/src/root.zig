@@ -5,6 +5,7 @@ comptime {
     _ = @import("sqlite/btree.zig");
     _ = @import("sqlite/schema.zig");
     _ = @import("zip.zig");
+    _ = @import("zip_writer.zig");
     _ = @import("wal.zig");
     _ = @import("json.zig");
     _ = @import("model.zig");

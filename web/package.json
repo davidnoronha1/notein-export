@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@preact/signals": "^2.11.1",
-    "fflate": "^0.8.3",
     "pdf-lib": "^1.17.1",
     "preact": "^10.29.8"
   }
