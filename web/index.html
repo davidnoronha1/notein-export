@@ -463,7 +463,11 @@
         flex: none;
         top: 56px;
         right: 12px;
-        bottom: 16px;
+        /* No `bottom` -- with both top and bottom set, an absolutely
+           positioned element's `height: auto` stretches to fill that whole
+           span instead of shrinking to its content (the free-canvas
+           thumbnail, ~100-200px), which is what made this a near-full-height
+           sidebar again despite `position: absolute`. */
         height: auto;
         max-height: calc(100% - 72px);
         border: 1px solid #333;
