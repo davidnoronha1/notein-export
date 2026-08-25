@@ -234,6 +234,135 @@
       #export-panel button:hover {
         background: #2a2a2a;
       }
+      .side-panel {
+        position: absolute;
+        top: 56px;
+        right: 12px;
+        width: 300px;
+        max-height: calc(100% - 80px);
+        display: flex;
+        flex-direction: column;
+        background: rgba(20, 20, 20, 0.92);
+        border: 1px solid #444;
+        border-radius: 10px;
+        z-index: 6;
+        overflow: hidden;
+      }
+      .side-panel.hidden {
+        display: none;
+      }
+      .side-panel-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-bottom: 1px solid #333;
+        flex: 0 0 auto;
+      }
+      .side-panel-tabs {
+        display: flex;
+        gap: 6px;
+        flex: 1 1 auto;
+      }
+      .side-panel-title {
+        flex: 1 1 auto;
+        color: #ddd;
+        font-size: 13px;
+      }
+      .side-panel button {
+        font-size: 12px;
+        padding: 5px 8px;
+        border-radius: 8px;
+        border: 1px solid #555;
+        background: #1e1e1e;
+        color: #eee;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .side-panel button:hover {
+        background: #2a2a2a;
+      }
+      .side-panel button.active {
+        background: #4f8cff;
+        border-color: #4f8cff;
+      }
+      .side-panel button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .side-panel-list {
+        overflow-y: auto;
+        padding: 10px;
+      }
+      .media-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+        gap: 8px;
+      }
+      .media-thumb {
+        position: relative;
+        aspect-ratio: 1;
+        border-radius: 6px;
+        overflow: hidden;
+        cursor: pointer;
+        background: #111;
+      }
+      .media-thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .media-dl {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        padding: 2px 6px !important;
+        font-size: 11px !important;
+        background: rgba(0, 0, 0, 0.6) !important;
+      }
+      .media-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .media-row {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 6px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .media-row audio {
+        width: 100%;
+        height: 28px;
+      }
+      .media-row-label {
+        color: #ddd;
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .media-row-actions {
+        display: flex;
+        gap: 6px;
+      }
+      .media-row a {
+        font-size: 12px;
+        padding: 5px 8px;
+        border-radius: 8px;
+        border: 1px solid #555;
+        background: #1e1e1e;
+        color: #8ab0ff;
+        text-decoration: none;
+      }
+      .media-empty {
+        color: #888;
+        font-size: 12px;
+        margin: 0;
+      }
       #zoom-control {
         position: absolute;
         bottom: 16px;
@@ -338,6 +467,9 @@
           <button id="export-page-png" type="button">Export page PNG</button>
           <button id="export-page-pdf" type="button">Export page PDF</button>
           <button id="export-page-svg" type="button">Export page SVG</button>
+          <div class="sep"></div>
+          <button id="media-tool" type="button">Media</button>
+          <button id="links-tool" type="button">Links</button>
         </div>
         <div id="selection-overlay">
           <div id="selection-rect"></div>
@@ -349,6 +481,24 @@
             <button id="export-region-svg" type="button">Export SVG</button>
             <button id="export-region-cancel" type="button" aria-label="Cancel selection">&times;</button>
           </div>
+        </div>
+        <div id="media-panel" class="side-panel hidden">
+          <div class="side-panel-header">
+            <div class="side-panel-tabs">
+              <button id="media-tab-images" type="button" class="active">Images</button>
+              <button id="media-tab-audio" type="button">Audio</button>
+            </div>
+            <button id="media-download-all" type="button" disabled>Download all (zip)</button>
+            <button id="media-panel-close" type="button" aria-label="Close">&times;</button>
+          </div>
+          <div id="media-panel-list" class="side-panel-list media-grid"></div>
+        </div>
+        <div id="links-panel" class="side-panel hidden">
+          <div class="side-panel-header">
+            <span class="side-panel-title">Links</span>
+            <button id="links-panel-close" type="button" aria-label="Close">&times;</button>
+          </div>
+          <div id="links-panel-list" class="side-panel-list"></div>
         </div>
         <div id="zoom-control" class="hidden">
           <button id="zoom-out" type="button" aria-label="Zoom out">&minus;</button>
