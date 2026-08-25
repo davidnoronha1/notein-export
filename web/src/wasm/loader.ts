@@ -48,6 +48,12 @@ export interface PageInfo {
   height: number;
   unbounded: boolean;
   color: number; // packed ARGB
+  /** Union of every item's bounds on this page, in page-local coordinates --
+   * the real extent of the ink, as opposed to `width`/`height` (the app's
+   * declared paper_spec, which for an unbounded/infinite-canvas page is
+   * often a nominal placeholder or entirely absent, not where content is).
+   * `undefined` if the page has no content. */
+  contentBounds?: { left: number; top: number; right: number; bottom: number };
 }
 
 export interface ImageDraw {
@@ -70,7 +76,7 @@ export interface TextBoxDraw {
   creationTime: number; // epoch ms, for chronological/z-order interleaving with ink
 }
 
-const PAGE_INFO_STRIDE = 16; // f32 width, f32 height, u32 unbounded, u32 color
+const PAGE_INFO_STRIDE = 36; // f32 width, f32 height, u32 unbounded, u32 color, 4x f32 content bounds, u32 has_content
 const IMAGE_DRAW_STRIDE = 32; // 4x f32 bounds, u32 name_ptr, u32 name_len, f64 creation_time
 const TEXTBOX_DRAW_STRIDE = 40; // 4x f32 bounds, f32 size, u32 color, u32 text_ptr, u32 text_len, f64 creation_time
 const VECTOR_POLY_STRIDE = 24; // f64 creation_time, u32 color, u32 vertex_offset, u32 vertex_count
@@ -161,11 +167,20 @@ export class NoteinModule {
     const view = new DataView(this.memory, ptr, count * PAGE_INFO_STRIDE);
     for (let i = 0; i < count; i++) {
       const base = i * PAGE_INFO_STRIDE;
+      const hasContent = view.getUint32(base + 32, true) !== 0;
       pages.push({
         width: view.getFloat32(base + 0, true),
         height: view.getFloat32(base + 4, true),
         unbounded: view.getUint32(base + 8, true) !== 0,
         color: view.getUint32(base + 12, true),
+        contentBounds: hasContent
+          ? {
+              left: view.getFloat32(base + 16, true),
+              top: view.getFloat32(base + 20, true),
+              right: view.getFloat32(base + 24, true),
+              bottom: view.getFloat32(base + 28, true),
+            }
+          : undefined,
       });
     }
     return pages;

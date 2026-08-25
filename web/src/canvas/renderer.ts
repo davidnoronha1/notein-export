@@ -6,6 +6,15 @@ import { FrameStats } from "../stats";
 type Overlay = ({ kind: "image"; item: ImageDraw } | { kind: "text"; item: TextBoxDraw }) & { creationTime: number };
 
 const PREFETCH_MARGIN_PAGES = 1;
+// While actively panning/zooming, rasterize ink at this fraction of native
+// resolution (a quarter the pixel count at 0.5x linear) and stretch it up to
+// full size -- rasterization cost here is pixel-count-dominated (measured:
+// ~29ms/frame zoomed out on a ~3k-stroke note vs. ~0.5ms just to cull, so the
+// per-pixel scanline work is what's actually slow), and a soft frame mid-
+// gesture is a better tradeoff than dropping frames. `Viewport.isInteracting`
+// flips back to false as soon as the gesture ends, at which point the very
+// next frame renders at full quality again.
+const INTERACTION_LOD_SCALE = 0.5;
 
 function argbToCss(argb: number): string {
   const a = ((argb >>> 24) & 0xff) / 255;
@@ -50,7 +59,7 @@ export class Renderer {
       this.viewport.frame(0, 0, this.layout.contentWidth, this.layout.contentHeight, width, height);
       return;
     }
-    this.viewport.frame(first.x, first.y, first.width, first.height, width, height);
+    this.viewport.frame(first.x + first.boxLeft, first.y + first.boxTop, first.width, first.height, width, height);
   }
 
   /**
@@ -110,8 +119,9 @@ export class Renderer {
     this.ctx.fillStyle = "#000000";
     this.ctx.fillRect(0, 0, widthPx, heightPx);
 
+    const inkPxPerUnit = this.viewport.isInteracting ? devicePxPerUnit * INTERACTION_LOD_SCALE : devicePxPerUnit;
     for (const page of visible) {
-      this.renderPage(page, camera, devicePxPerUnit, widthPx, heightPx);
+      this.renderPage(page, camera, devicePxPerUnit, inkPxPerUnit, widthPx, heightPx);
     }
   }
 
@@ -135,14 +145,17 @@ export class Renderer {
     page: PageLayout,
     camera: { x: number; y: number; zoom: number },
     devicePxPerUnit: number,
+    inkPxPerUnit: number,
     canvasWidthPx: number,
     canvasHeightPx: number,
   ): void {
     // Intersection of the page box and the viewport, in world space.
-    const vx0 = Math.max(page.x, camera.x);
-    const vy0 = Math.max(page.y, camera.y);
-    const vx1 = Math.min(page.x + page.width, camera.x + canvasWidthPx / devicePxPerUnit);
-    const vy1 = Math.min(page.y + page.height, camera.y + canvasHeightPx / devicePxPerUnit);
+    const boxX = page.x + page.boxLeft;
+    const boxY = page.y + page.boxTop;
+    const vx0 = Math.max(boxX, camera.x);
+    const vy0 = Math.max(boxY, camera.y);
+    const vx1 = Math.min(boxX + page.width, camera.x + canvasWidthPx / devicePxPerUnit);
+    const vy1 = Math.min(boxY + page.height, camera.y + canvasHeightPx / devicePxPerUnit);
     const vw = vx1 - vx0;
     const vh = vy1 - vy0;
     if (vw <= 0 || vh <= 0) return;
@@ -151,8 +164,13 @@ export class Renderer {
     const localX = vx0 - page.x;
     const localY = vy0 - page.y;
 
-    const pixelW = Math.max(1, Math.round(vw * devicePxPerUnit));
-    const pixelH = Math.max(1, Math.round(vh * devicePxPerUnit));
+    // Full-resolution destination size (screen pixels this region occupies)
+    // vs. the (possibly reduced, see INTERACTION_LOD_SCALE) size wasm
+    // actually rasterizes at -- drawInk stretches the latter to the former.
+    const destW = Math.max(1, Math.round(vw * devicePxPerUnit));
+    const destH = Math.max(1, Math.round(vh * devicePxPerUnit));
+    const pixelW = Math.max(1, Math.round(vw * inkPxPerUnit));
+    const pixelH = Math.max(1, Math.round(vh * inkPxPerUnit));
 
     // Screen position (device pixels) of this rasterized rect's top-left.
     const screenX = (vx0 - camera.x) * devicePxPerUnit;
@@ -161,7 +179,7 @@ export class Renderer {
     // Page background (paper) first, using the note's real paper color.
     if (!page.unbounded) {
       this.ctx.fillStyle = argbToCss(page.color);
-      this.ctx.fillRect(screenX, screenY, pixelW, pixelH);
+      this.ctx.fillRect(screenX, screenY, destW, destH);
     }
 
     // Ink (strokes+shapes), images, and text boxes are composited in true
@@ -179,12 +197,12 @@ export class Renderer {
 
     let prevTime = -Infinity;
     for (const overlay of overlays) {
-      this.drawInk(page, localX, localY, vw, vh, screenX, screenY, pixelW, pixelH, prevTime, overlay.creationTime);
+      this.drawInk(page, localX, localY, vw, vh, screenX, screenY, pixelW, pixelH, destW, destH, prevTime, overlay.creationTime);
       if (overlay.kind === "image") this.drawImageItem(overlay.item, page, camera, devicePxPerUnit);
       else this.drawTextBoxItem(overlay.item, page, camera, devicePxPerUnit);
       prevTime = overlay.creationTime;
     }
-    this.drawInk(page, localX, localY, vw, vh, screenX, screenY, pixelW, pixelH, prevTime, Infinity);
+    this.drawInk(page, localX, localY, vw, vh, screenX, screenY, pixelW, pixelH, destW, destH, prevTime, Infinity);
 
     if (!page.unbounded) {
       this.ctx.strokeStyle = "rgba(0,0,0,0.15)";
@@ -211,6 +229,8 @@ export class Renderer {
     screenY: number,
     pixelW: number,
     pixelH: number,
+    destW: number,
+    destH: number,
     timeMin: number,
     timeMax: number,
   ): void {
@@ -219,7 +239,10 @@ export class Renderer {
     this.scratchCanvas.height = pixelH;
     const imgData = new ImageData(new Uint8ClampedArray(rgba), pixelW, pixelH);
     this.scratchCtx.putImageData(imgData, 0, 0);
-    this.ctx.drawImage(this.scratchCanvas, screenX, screenY);
+    // destW/destH stretch up to full resolution when pixelW/pixelH were
+    // rasterized smaller (INTERACTION_LOD_SCALE) -- identical draw call and
+    // cost as before when they match (the common, settled case).
+    this.ctx.drawImage(this.scratchCanvas, 0, 0, pixelW, pixelH, screenX, screenY, destW, destH);
   }
 
   private drawImageItem(img: ImageDraw, page: PageLayout, camera: { x: number; y: number }, devicePxPerUnit: number): void {
@@ -254,7 +277,9 @@ export class Renderer {
       this.imageCache.set(name, "failed");
       return;
     }
-    const blob = new Blob([bytes.slice().buffer as ArrayBuffer]);
+    // `bytes` is already a freshly-copied, tightly-sized owned buffer (see
+    // NoteinModule.getBytes) -- no need to copy it again just to reach .buffer.
+    const blob = new Blob([bytes.buffer as ArrayBuffer]);
     createImageBitmap(blob)
       .then((bitmap) => {
         this.imageCache.set(name, bitmap);

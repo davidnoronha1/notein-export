@@ -88,12 +88,13 @@ function currentPage(pages: PageLayout[], viewport: Viewport): PageLayout | null
   const rect = canvas.getBoundingClientRect();
   const center = viewport.screenToWorld(rect.width / 2, rect.height / 2);
   for (const p of pages) {
-    if (center.y >= p.y && center.y <= p.y + p.height) return p;
+    const top = p.y + p.boxTop;
+    if (center.y >= top && center.y <= top + p.height) return p;
   }
   let best = pages[0]!;
   let bestDist = Infinity;
   for (const p of pages) {
-    const d = Math.abs(p.y + p.height / 2 - center.y);
+    const d = Math.abs(p.y + p.boxTop + p.height / 2 - center.y);
     if (d < bestDist) {
       bestDist = d;
       best = p;
@@ -148,6 +149,16 @@ async function main(): Promise<void> {
     minimap?.updateIndicator();
     syncZoomUI();
     syncPageExportUI();
+    // A selection (armed, mid-drag, or a finished region with the export
+    // panel open) is anchored to screen position -- once the camera pans or
+    // zooms underneath it, it no longer corresponds to the content it was
+    // drawn over, so treat any camera movement as an implicit cancel. Panning
+    // is normally unreachable mid-drag (the selection overlay captures the
+    // pointer while select mode is active), but wheel/pinch-zoom listens on
+    // the canvas itself and isn't blocked by the overlay, and a finished
+    // selection's export panel stays open (with select mode already off)
+    // while the canvas underneath is still freely pannable.
+    if (selectMode || pendingRect) cancelSelection();
   });
 
   window.addEventListener("resize", () => renderer?.requestRender());
@@ -185,10 +196,24 @@ async function main(): Promise<void> {
     pendingRect = null;
   }
 
-  selectToolEl.addEventListener("click", () => {
+  /** Cancels any in-progress or pending selection: an armed-but-not-yet-drawn
+   * selection, a mid-drag rect, or a finished region still showing its export
+   * panel. Called on Escape and on any camera movement (see the Viewport
+   * onChange callback above) -- both make the current rect meaningless. */
+  function cancelSelection(): void {
     hideExportPanel();
     selectionRectEl.style.display = "none";
-    setSelectMode(!selectMode);
+    setSelectMode(false);
+  }
+
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && (selectMode || pendingRect)) cancelSelection();
+  });
+
+  selectToolEl.addEventListener("click", () => {
+    const turningOn = !selectMode;
+    cancelSelection();
+    if (turningOn) setSelectMode(true);
   });
 
   selectionOverlayEl.addEventListener("pointerdown", (e) => {
@@ -253,10 +278,7 @@ async function main(): Promise<void> {
     exportPanelEl.style.top = `${top}px`;
   });
 
-  exportRegionCancelEl.addEventListener("click", () => {
-    hideExportPanel();
-    selectionRectEl.style.display = "none";
-  });
+  exportRegionCancelEl.addEventListener("click", () => cancelSelection());
 
   const regionExportButtons = [exportRegionPngEl, exportRegionPdfEl, exportRegionSvgEl];
 
@@ -355,9 +377,7 @@ async function main(): Promise<void> {
       minimapEl.classList.add("hidden");
       zoomControlEl.classList.add("hidden");
       exportControlEl.classList.add("hidden");
-      hideExportPanel();
-      setSelectMode(false);
-      selectionRectEl.style.display = "none";
+      cancelSelection();
       mediaPanel.reset();
       linksPanel.reset();
     } finally {

@@ -1,25 +1,22 @@
 # notein-export
 
-Browser-based viewer and exporter for **Notein** (`.in`) handwriting notes — no app, no cloud, everything runs locally in the browser.
+Browser-based viewer and exporter for **Notein** (`.in`) handwriting notes. Drop a `.in` file in and view, pan, and export — everything runs locally in your browser.
 
-Live demo: **https://noteinexport.neswk.workers.dev**
-
-`notein-export` unpacks the `.in` format (plain ZIP + SQLite) with a tiny Zig/WASM core, renders pressure-aware vector ink on `<canvas>`, and lets you export any region or page to **PNG / PDF / SVG** at 1×/2×/4×.
+Unpacks the `.in` format (ZIP + SQLite) with a small Zig/WASM core, renders pressure-aware vector ink on `<canvas>`, and exports any region or page to **PNG / PDF / SVG** at 1× / 2× / 4×.
 
 ## Features
 
-- **Drag-and-drop** `.in` file → instant local render (WASM, zero network upload)
-- Infinite-canvas + bounded (A4/Letter) notes — pan, zoom, minimap with viewport indicator
-- Pressure-aware strokes (replayed as variable-width polygons, not bitmaps)
-- Images, typed text boxes, and shapes composited in chronological order
-- **Export**: region-select or whole-page export to PNG / PDF (via `pdf-lib`) / SVG (true vector) — the selection menu attaches to your selection, with a progress indicator for larger exports
-- **Media panel**: browse every image and audio recording in the note, jump to where an image sits on the page, play/download audio, or grab everything at once as one zip — built entirely in Zig (real ZIP local/central headers + CRC32, no JS zip library)
-- **Links panel**: browse every hyperlink in the note, jump to its location, or open it externally
-- Offline/static deploy — served as Cloudflare Workers assets, auto-deployed on every push to `master`
+- **Drag & drop** `.in` file → instant local render, no upload
+- **Infinite canvas + bounded pages** (A4 / Letter) — pan, zoom, and minimap with viewport indicator
+- **Pressure-aware strokes** replayed as variable-width polygons, not bitmaps
+- **Images, typed text, and shapes** composited in chronological order
+- **Export** — select a region or export the whole page to PNG, PDF (`pdf-lib`), or true vector SVG. Selection menu follows your selection with a progress indicator for large exports
+- **Media panel** — browse all embedded images and audio, jump to an image's location, play/download audio, or download everything as a single ZIP (ZIP assembly is done in Zig with real local/central headers and CRC32, no JS zip library)
+- **Links panel** — browse all hyperlinks, jump to their position, or open externally
 
 ## File format
 
-`.in` is a ZIP archive containing:
+`.in` is a ZIP archive:
 
 | File | Purpose |
 |---|---|
@@ -27,103 +24,87 @@ Live demo: **https://noteinexport.neswk.workers.dev**
 | `…_db-wal`, `…_db-shm` | WAL/journal (applied on load) |
 | `note_meta.json` | Title, timestamps, folder, flags |
 | `note_extra.json`, `note_in_flag.json`, `note_label.json`, `notepdf_lost_info.json` | Metadata / flags / labels |
-| `note_image_<uuid>.*`, `note_audio_<uuid>.*` | Embedded image/audio assets, referenced by name from the DB |
+| `note_image_<uuid>.*`, `note_audio_<uuid>.*` | Embedded images/audio, referenced by name from the DB |
 
-Key SQLite tables: `NoteContentEntity`, `PageEntity`, `StrokeEntity` (`record_json` → `points: {x,y,p,action}[]`), `TextBoxEntity`, `ImageEntity`, `ShapeEntity`, `HyperLinkEntity`, `AudioFileEntity`, plus layers and outlines. See [`FORMAT.md`](FORMAT.md) for full reverse-engineering notes.
+Key tables: `NoteContentEntity`, `PageEntity`, `StrokeEntity` (`record_json` → `points: {x,y,p,action}[]`), `TextBoxEntity`, `ImageEntity`, `ShapeEntity`, `HyperLinkEntity`, `AudioFileEntity`, plus layers and outlines.
 
-To read programmatically: unzip → open `…_db` with any SQLite library → read `StrokeEntity.record_json` → replay points.
+See [`FORMAT.md`](FORMAT.md) for the full reverse-engineering notes. To read programmatically: unzip → open `…_db` with any SQLite library → read `StrokeEntity.record_json` → replay points.
 
-## Quick start
+## Getting started
 
-### Use the hosted viewer
+### Use the viewer
 
-1. Open https://noteinexport.neswk.workers.dev
-2. Drag a `.in` file onto the drop zone (or choose via file picker)
-3. Pan/zoom, use the minimap to jump pages, select a region or export the current page
-4. Open **Media** to browse/download images and audio (or grab a zip of everything), or **Links** to browse and jump to hyperlinks
+1. Open the viewer and drop a `.in` file onto the drop zone (or use the file picker)
+2. Pan, zoom, and use the minimap to navigate
+3. Drag to select a region or export the current page; use **Media** and **Links** to browse embedded assets
 
-Nothing is uploaded — parsing stays in your browser (WASM memory).
+Files never leave your machine — parsing happens in WASM memory in the browser.
 
 ### Run locally
 
-**Prerequisites:** [Bun](https://bun.sh) 1.3+, [Zig](https://ziglang.org) 0.17+, Cloudflare `wrangler` for deploy.
+**Prerequisites:** [Bun](https://bun.sh) 1.3+ and [Zig](https://ziglang.org) 0.17+.
 
 ```bash
 git clone https://github.com/davidnoronha1/notein-export.git
 cd notein-export
 
-# build WASM + web
 cd web
 bun install
-bun run build        # -> zig build + vite build (outputs to web/dist)
+bun run build        # builds WASM (zig build) + web (vite) -> web/dist
 
-# dev server (auto rebuilds WASM)
-bun run dev          # http://localhost:5173
+bun run dev          # dev server with auto WASM rebuild -> http://localhost:5173
 ```
 
-### Tests (Zig core)
+### Tests
 
-The `wasm/` tests previously used a 96 MB `fixtures/diary.in` sample. That fixture was **purged from git history** (and is ignored by `.gitignore`) — the integration tests now skip gracefully when no `.in` fixture is present:
+The Zig core has unit and integration tests. Integration tests need a local `.in` fixture (git-ignored), and skip gracefully if none is present:
 
 ```bash
 cd wasm
-zig build test                # unit tests
-zig build test -- --test-filter diary  # integration (skips if fixtures/*.in missing)
+zig build test                              # unit tests
+zig build test -- --test-filter diary       # integration (requires fixtures/*.in)
+
+# to enable integration tests locally:
+# drop any .in export as fixtures/diary.in and rerun
 ```
 
-To run integration tests locally, drop any `.in` export as `fixtures/diary.in` (ignored by git) and rerun.
+`fixtures/*.in` and `*.in` are git-ignored — don't commit note samples.
 
 ## Project structure
 
 ```
 notein-export/
 ├── FORMAT.md              # reverse-engineered .in spec
-├── .github/workflows/     # CI: build (Zig + web) and deploy on push to master
-├── wasm/                  # Zig → WASM core (zip read/write, SQLite btree/pager, raster, window)
-│   ├── src/main.zig       # WASM C-ABI (alloc/open/render/get_visible_*/get_all_*/build_media_zip)
+├── wasm/                  # Zig → WASM core (zip, SQLite btree/pager, raster)
+│   ├── src/main.zig       # WASM C-ABI (alloc/open/render/get_visible_*/build_media_zip)
 │   ├── src/model.zig      # note model (pages/strokes/images/text/links/audio)
-│   ├── src/zip.zig        # ZIP reader (for the .in container)
-│   ├── src/zip_writer.zig # ZIP writer (STORE-only, for the media download-all)
+│   ├── src/zip.zig        # ZIP reader for the .in container
+│   ├── src/zip_writer.zig # ZIP writer (STORE) for media download-all
 │   └── build.zig          # -> web/src/wasm/notein.wasm
-├── web/                   # Vite + TypeScript/Preact viewer
-│   ├── index.html         # shell (canvas, minimap, export controls)
+├── web/                   # Vite + TypeScript + Preact viewer
+│   ├── index.html
 │   ├── src/main.ts        # app glue (file input, viewport, export wiring)
 │   ├── src/wasm/loader.ts # typed WASM wrapper (zero-copy views)
 │   ├── src/canvas/        # renderer, viewport, minimap, export-render, layout
-│   ├── src/media-panel.tsx, links-panel.tsx, icons.tsx  # Preact UI for the browse panels
-│   └── src/export.ts      # PNG/PDF/SVG export helpers
-├── fixtures/           # (git-ignored) local .in samples only
-└── wrangler.toml       # Cloudflare Workers assets deploy
+│   ├── src/media-panel.tsx, src/links-panel.tsx, src/icons.tsx
+│   └── src/export.ts      # PNG / PDF / SVG helpers
+└── fixtures/              # local .in samples only (git-ignored)
 ```
 
 ## How rendering works
 
 1. `wasm.openFile(bytes)` — unzip, WAL-replay, parse SQLite btree, build in-memory model
-2. `set_active_window` + `render_viewport(page, x,y,w,h, pixelW, pixelH, ...)` — returns packed polygon vertices over WASM memory
-3. JS `Renderer` draws polygons via Canvas2D, compositing images/text by `creationTime`
-4. `export-render.ts` reuses same `render_viewport` path but to an offscreen canvas/SVG at chosen `scale` (1×/2×/4×)
-5. The Media/Links panels call whole-note (not viewport-culled) exports — `get_all_images/links/audio` — once, lazily, on first open; per-item bytes still come from the same `get_bytes(name)` used for on-canvas images
-6. "Download all" calls `build_media_zip()`, which reads every image/audio asset straight out of the already-open `.in` archive and assembles a real ZIP (local + central directory headers, CRC32) inside wasm — JS just receives the finished bytes and triggers the download
+2. `set_active_window` + `render_viewport(page, x, y, w, h, pixelW, pixelH)` — returns packed polygon vertices over WASM memory
+3. JS `Renderer` draws polygons via Canvas2D, compositing images and text by `creationTime`
+4. `export-render.ts` reuses the same `render_viewport` path on an offscreen canvas/SVG at the chosen scale (1×/2×/4×)
+5. Media/Links panels call `get_all_images` / `get_all_links` / `get_all_audio` once (lazily on first open); per-item bytes come from `get_bytes(name)`
+6. **Download all** calls `build_media_zip()` — reads every image/audio asset from the already-open `.in` archive and assembles a ZIP inside WASM; JS just downloads the resulting bytes
 
-## Deployment
+## Privacy
 
-Static site is deployed as Cloudflare Workers assets (`noteinexport.neswk.workers.dev`).
-
-**Automatic:** `.github/workflows/deploy.yml` builds (Zig nightly → wasm → `vite build`) and runs `wrangler deploy` on every push to `master`. Needs a `CLOUDFLARE_API_TOKEN` repo secret with Workers edit permission for the account in `wrangler.toml`'s `account_id`.
-
-**Manual:**
-
-```bash
-cd web && bun run build   # -> zig build + vite build
-bunx wrangler deploy --config ../wrangler.toml
-```
-
-## Privacy & notes
-
-- `.in` files never leave your machine — the viewer has no backend, no upload, no telemetry.
-- `*.in` and `fixtures/*.in` are git-ignored and **not** tracked with Git LFS. Do not commit diary samples; use local `fixtures/` only.
-- The viewer is read-only; it does not write back to `.in`.
+- `.in` files never leave your device. There is no backend, no upload, and no telemetry.
+- The viewer is read-only — it does not modify `.in` files.
 
 ## License
 
-MIT — use, fork, PRs welcome.
+MIT — use, fork, and PRs welcome.

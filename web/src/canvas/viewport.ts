@@ -12,6 +12,11 @@ export const MAX_ZOOM = 8;
  * Calls `onChange` whenever the camera moves, so the caller can re-render
  * (and re-evaluate the active page window) without polling every frame.
  */
+// How long after the last wheel event to still count as "interacting" --
+// covers the gaps between individual trackpad/mouse wheel ticks during one
+// continuous gesture, which otherwise wouldn't overlap in time at all.
+const WHEEL_SETTLE_MS = 150;
+
 export class Viewport {
   camera: Camera = { x: 0, y: 0, zoom: 1 };
   private dragging = false;
@@ -19,6 +24,8 @@ export class Viewport {
   private activePointers = new Map<number, { x: number; y: number }>();
   private pinchStartDist = 0;
   private pinchStartZoom = 1;
+  private lastWheelTime = 0;
+  private settleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -29,6 +36,29 @@ export class Viewport {
     canvas.addEventListener("pointerup", this.onPointerUp);
     canvas.addEventListener("pointercancel", this.onPointerUp);
     canvas.addEventListener("wheel", this.onWheel, { passive: false });
+  }
+
+  /**
+   * True while the camera is actively being dragged, pinched, or wheeled --
+   * i.e. while another frame is imminent anyway, so it's not worth paying
+   * full rasterization cost for a frame the user won't get to look at.
+   * `Renderer` uses this to render at reduced resolution mid-gesture and
+   * snap back to full quality once things settle (see `scheduleSettle`).
+   */
+  get isInteracting(): boolean {
+    return this.dragging || this.activePointers.size >= 2 || performance.now() - this.lastWheelTime < WHEEL_SETTLE_MS;
+  }
+
+  /** Guarantees one more `onChange` fires after interaction stops, even if
+   * no further input event would otherwise trigger it -- e.g. the wheel-quiet
+   * window elapsing produces no event of its own, so without this the view
+   * would stay at reduced quality until the next unrelated render. */
+  private scheduleSettle(delayMs: number): void {
+    if (this.settleTimer !== null) clearTimeout(this.settleTimer);
+    this.settleTimer = setTimeout(() => {
+      this.settleTimer = null;
+      this.onChange();
+    }, delayMs);
   }
 
   /** device pixels per CSS pixel, so canvas rendering stays crisp. */
@@ -100,11 +130,16 @@ export class Viewport {
       this.dragging = false;
       this.lastPointer = null;
       this.canvas.classList.remove("panning");
+      // The drag's last onChange (above, in onPointerMove) rendered at
+      // reduced quality since isInteracting was still true at that instant;
+      // it's now false, so this one snaps back to full quality.
+      this.onChange();
     }
   };
 
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
+    this.lastWheelTime = performance.now();
     if (e.ctrlKey || e.metaKey) {
       // Pinch-zoom gesture (trackpad) or ctrl+wheel: zoom around cursor.
       const factor = Math.exp(-e.deltaY * 0.01);
@@ -115,6 +150,7 @@ export class Viewport {
       this.camera.y += e.deltaY / this.camera.zoom;
       this.onChange();
     }
+    this.scheduleSettle(WHEEL_SETTLE_MS + 20);
   };
 
   /** Sets zoom directly (e.g. from a slider), anchored on the viewport center. */

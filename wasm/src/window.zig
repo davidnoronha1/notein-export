@@ -2,8 +2,9 @@ const std = @import("std");
 const model = @import("model.zig");
 const json = @import("json.zig");
 const record = @import("sqlite/record.zig");
+const tessellate = @import("tessellate.zig");
 
-pub const Point = struct { x: f32, y: f32, p: f32 };
+pub const Point = model.Point;
 
 pub const DecodedStroke = struct {
     bounds: model.Bounds,
@@ -11,6 +12,12 @@ pub const DecodedStroke = struct {
     width: f32,
     points: []const Point,
     creation_time: i64,
+    /// The stroke's fill polygon, tessellated once here at decode time (see
+    /// decodeStroke) instead of on every frame it's visible in -- `raster.zig`
+    /// only falls back to re-tessellating on the fly when a render call's
+    /// min-width floor needs a wider ribbon than this (thumbnail generation;
+    /// never the interactive path). Empty for degenerate (<2 point) strokes.
+    tess_poly: [][2]f32 = &.{},
 };
 
 pub const DecodedShape = struct {
@@ -36,6 +43,24 @@ pub const DecodedTextBox = struct {
 pub const DrawKind = enum(u8) { stroke, shape };
 pub const DrawRef = struct { kind: DrawKind, index: u32 };
 
+/// Uniform spatial grid over `PageContent.order`'s bounds (one page's worth
+/// of strokes+shapes), letting a viewport cull query touch only nearby items
+/// instead of scanning every item on the page -- see `queryGrid` in main.zig.
+/// A CSR (compressed sparse row) layout: `cell_items[cell_start[c]..cell_start[c+1]]`
+/// is the list of `order`-indices whose bounds overlap cell `c` (an item
+/// spanning multiple cells appears once per cell it touches). Zero `cols`
+/// means "empty/no grid" (an empty page) -- callers should skip querying.
+pub const Grid = struct {
+    cols: u32 = 0,
+    rows: u32 = 0,
+    min_x: f32 = 0,
+    min_y: f32 = 0,
+    cell_w: f32 = 1,
+    cell_h: f32 = 1,
+    cell_start: []const u32 = &.{},
+    cell_items: []const u32 = &.{},
+};
+
 pub const PageContent = struct {
     strokes: []const DecodedStroke,
     shapes: []const DecodedShape,
@@ -43,6 +68,12 @@ pub const PageContent = struct {
     /// strokes+shapes interleaved by creation_time ascending (draw in this
     /// order -- earlier entries render first / end up underneath).
     order: []const DrawRef,
+    grid: Grid = .{},
+    /// Per-`order`-index scratch stamp, sized `order.len`, for dedup during a
+    /// grid query (an item spanning multiple visited cells must only be
+    /// collected once) -- compared against a monotonic generation counter
+    /// instead of being cleared on every query. See main.zig's `queryGrid`.
+    seen: []u32 = &.{},
 };
 
 fn argbFromSigned(v: i64) u32 {
@@ -68,8 +99,15 @@ fn decodeStroke(alloc: std.mem.Allocator, note: *const model.Note, entry: model.
         raw_points[i] = .{ .x = pv.get("x").?.asF32(), .y = pv.get("y").?.asF32(), .p = if (pv.get("p")) |p| p.asF32() else 0.5 };
     }
     const points = try smoothPoints(alloc, raw_points);
+    const tess_poly = try tessellatePoints(alloc, points, width);
 
-    return .{ .bounds = entry.bounds, .color = color, .width = width, .points = points, .creation_time = creation_time };
+    return .{ .bounds = entry.bounds, .color = color, .width = width, .points = points, .creation_time = creation_time, .tess_poly = tess_poly };
+}
+
+fn tessellatePoints(alloc: std.mem.Allocator, points: []const Point, width: f32) ![][2]f32 {
+    if (points.len < 2) return &.{};
+    const buf = try alloc.alloc([2]f32, points.len * 2);
+    return tessellate.tessellateStroke(points, width, buf);
 }
 
 /// Catmull-Rom-interpolates a raw stylus sample path into a denser point set
@@ -176,6 +214,102 @@ fn readI64Col(db: anytype, row: anytype, hdr: record.RecordHeader, i: usize) i64
     return if (v == .int) v.int else 0;
 }
 
+fn boundsOfRef(ref: DrawRef, strokes: []const DecodedStroke, shapes: []const DecodedShape) model.Bounds {
+    return switch (ref.kind) {
+        .stroke => strokes[ref.index].bounds,
+        .shape => shapes[ref.index].bounds,
+    };
+}
+
+const CellRange = struct { cx0: u32, cx1: u32, cy0: u32, cy1: u32 };
+
+fn clampCell(f: f32, n: u32) u32 {
+    if (n == 0 or f <= 0) return 0;
+    const fi: u32 = @intFromFloat(@floor(f));
+    return @min(fi, n - 1);
+}
+
+fn cellRangeFor(b: model.Bounds, min_x: f32, min_y: f32, cell_w: f32, cell_h: f32, cols: u32, rows: u32) CellRange {
+    return .{
+        .cx0 = clampCell((b.left - min_x) / cell_w, cols),
+        .cx1 = clampCell((b.right - min_x) / cell_w, cols),
+        .cy0 = clampCell((b.top - min_y) / cell_h, rows),
+        .cy1 = clampCell((b.bottom - min_y) / cell_h, rows),
+    };
+}
+
+/// Builds a uniform spatial grid over `order`'s items (see `Grid`'s doc
+/// comment), sized to average roughly one item per cell so a viewport query
+/// touches close to `O(visible)` cells+items instead of scanning every item
+/// on the page. Two passes over `order` (count, then fill) -- cheap relative
+/// to the JSON-decode + smoothing + tessellation `order`'s items already went
+/// through to get here, and this only runs once per page decode, not per frame.
+fn buildGrid(alloc: std.mem.Allocator, order: []const DrawRef, strokes: []const DecodedStroke, shapes: []const DecodedShape) !Grid {
+    if (order.len == 0) return .{};
+
+    var min_x: f32 = std.math.inf(f32);
+    var min_y: f32 = std.math.inf(f32);
+    var max_x: f32 = -std.math.inf(f32);
+    var max_y: f32 = -std.math.inf(f32);
+    for (order) |ref| {
+        const b = boundsOfRef(ref, strokes, shapes);
+        min_x = @min(min_x, b.left);
+        max_x = @max(max_x, b.right);
+        min_y = @min(min_y, b.top);
+        max_y = @max(max_y, b.bottom);
+    }
+    if (!std.math.isFinite(min_x) or !std.math.isFinite(min_y) or !std.math.isFinite(max_x) or !std.math.isFinite(max_y)) return .{};
+
+    const w = @max(1.0, max_x - min_x);
+    const h = @max(1.0, max_y - min_y);
+    const target = std.math.clamp(@sqrt(@as(f32, @floatFromInt(order.len))), 1.0, 128.0);
+    const cols: u32 = @intFromFloat(target);
+    const rows: u32 = cols;
+    const cell_w = w / @as(f32, @floatFromInt(cols));
+    const cell_h = h / @as(f32, @floatFromInt(rows));
+    const n_cells: usize = @as(usize, cols) * @as(usize, rows);
+
+    const counts = try alloc.alloc(u32, n_cells);
+    defer alloc.free(counts);
+    @memset(counts, 0);
+    for (order) |ref| {
+        const r = cellRangeFor(boundsOfRef(ref, strokes, shapes), min_x, min_y, cell_w, cell_h, cols, rows);
+        var cy = r.cy0;
+        while (cy <= r.cy1) : (cy += 1) {
+            var cx = r.cx0;
+            while (cx <= r.cx1) : (cx += 1) counts[cy * cols + cx] += 1;
+        }
+    }
+
+    const cell_start = try alloc.alloc(u32, n_cells + 1);
+    var acc: u32 = 0;
+    for (0..n_cells) |i| {
+        cell_start[i] = acc;
+        acc += counts[i];
+    }
+    cell_start[n_cells] = acc;
+
+    const cursor = try alloc.alloc(u32, n_cells);
+    defer alloc.free(cursor);
+    @memcpy(cursor, cell_start[0..n_cells]);
+
+    const cell_items = try alloc.alloc(u32, acc);
+    for (order, 0..) |ref, idx| {
+        const r = cellRangeFor(boundsOfRef(ref, strokes, shapes), min_x, min_y, cell_w, cell_h, cols, rows);
+        var cy = r.cy0;
+        while (cy <= r.cy1) : (cy += 1) {
+            var cx = r.cx0;
+            while (cx <= r.cx1) : (cx += 1) {
+                const cell = cy * cols + cx;
+                cell_items[cursor[cell]] = @intCast(idx);
+                cursor[cell] += 1;
+            }
+        }
+    }
+
+    return .{ .cols = cols, .rows = rows, .min_x = min_x, .min_y = min_y, .cell_w = cell_w, .cell_h = cell_h, .cell_start = cell_start, .cell_items = cell_items };
+}
+
 /// Keeps decoded (JSON-parsed, ready-to-rasterize) content for only the pages
 /// currently "active" (in or near the viewport). Entering a page decodes its
 /// strokes/shapes/text; leaving one frees that memory. A page re-entering the
@@ -197,13 +331,19 @@ pub const Window = struct {
     }
 
     fn freeContent(self: *Window, content: PageContent) void {
-        for (content.strokes) |s| self.alloc.free(s.points);
+        for (content.strokes) |s| {
+            self.alloc.free(s.points);
+            self.alloc.free(s.tess_poly);
+        }
         self.alloc.free(content.strokes);
         for (content.shapes) |s| self.alloc.free(s.points);
         self.alloc.free(content.shapes);
         for (content.text_boxes) |t| self.alloc.free(t.text);
         self.alloc.free(content.text_boxes);
         self.alloc.free(content.order);
+        self.alloc.free(content.grid.cell_start);
+        self.alloc.free(content.grid.cell_items);
+        self.alloc.free(content.seen);
     }
 
     /// Sets which pages should be decoded right now. Pages not in `page_indices`
@@ -259,11 +399,17 @@ pub const Window = struct {
             }
         }.lessThan);
 
+        const grid = try buildGrid(self.alloc, order, strokes_slice, shapes_slice);
+        const seen = try self.alloc.alloc(u32, order.len);
+        @memset(seen, 0);
+
         return .{
             .strokes = strokes_slice,
             .shapes = shapes_slice,
             .text_boxes = try texts.toOwnedSlice(),
             .order = order,
+            .grid = grid,
+            .seen = seen,
         };
     }
 

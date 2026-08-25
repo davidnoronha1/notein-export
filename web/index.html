@@ -459,6 +459,24 @@
         pointer-events: none;
         border-radius: 2px;
       }
+      /* Infinite-canvas notes: one 2D thumbnail of the whole content instead
+         of a vertical page stack, with a viewport rect free to move on both
+         axes (see Minimap's `freeform` mode) -- #minimap-indicator's default
+         full-bleed-width styling above only makes sense for a vertical strip
+         of stacked pages, so the free-roaming indicator overrides it. */
+      #minimap-track.free {
+        width: 96px;
+        cursor: crosshair;
+      }
+      .minimap-free-canvas {
+        display: block;
+        width: 96px;
+        border: 1px solid #333;
+      }
+      #minimap-indicator.free {
+        left: 0;
+        width: 0;
+      }
       #file-input {
         display: none;
       }

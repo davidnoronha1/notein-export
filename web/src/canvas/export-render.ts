@@ -94,10 +94,12 @@ async function renderPageInto(
   pixelsPerUnit: number,
   imageCache: Map<string, ImageBitmap | null>,
 ): Promise<void> {
-  const vx0 = Math.max(page.x, rect.x);
-  const vy0 = Math.max(page.y, rect.y);
-  const vx1 = Math.min(page.x + page.width, rect.x + rect.w);
-  const vy1 = Math.min(page.y + page.height, rect.y + rect.h);
+  const boxX = page.x + page.boxLeft;
+  const boxY = page.y + page.boxTop;
+  const vx0 = Math.max(boxX, rect.x);
+  const vy0 = Math.max(boxY, rect.y);
+  const vx1 = Math.min(boxX + page.width, rect.x + rect.w);
+  const vy1 = Math.min(boxY + page.height, rect.y + rect.h);
   const vw = vx1 - vx0;
   const vh = vy1 - vy0;
   if (vw <= 0 || vh <= 0) return;
@@ -150,7 +152,9 @@ async function preloadImages(wasm: NoteinModule, images: ImageDraw[], cache: Map
       continue;
     }
     try {
-      const blob = new Blob([bytes.slice().buffer as ArrayBuffer]);
+      // `bytes` is already a freshly-copied, tightly-sized owned buffer (see
+      // NoteinModule.getBytes) -- no need to copy it again just to reach .buffer.
+      const blob = new Blob([bytes.buffer as ArrayBuffer]);
       cache.set(img.name, await createImageBitmap(blob));
     } catch {
       cache.set(img.name, null);
@@ -249,10 +253,12 @@ async function appendPageSvg(
   rect: WorldRect,
   imageDataUris: Map<string, string | null>,
 ): Promise<void> {
-  const vx0 = Math.max(page.x, rect.x);
-  const vy0 = Math.max(page.y, rect.y);
-  const vx1 = Math.min(page.x + page.width, rect.x + rect.w);
-  const vy1 = Math.min(page.y + page.height, rect.y + rect.h);
+  const boxX = page.x + page.boxLeft;
+  const boxY = page.y + page.boxTop;
+  const vx0 = Math.max(boxX, rect.x);
+  const vy0 = Math.max(boxY, rect.y);
+  const vx1 = Math.min(boxX + page.width, rect.x + rect.w);
+  const vy1 = Math.min(boxY + page.height, rect.y + rect.h);
   const vw = vx1 - vx0;
   const vh = vy1 - vy0;
   if (vw <= 0 || vh <= 0) return;

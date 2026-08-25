@@ -9,12 +9,27 @@ const json = @import("json.zig");
 
 pub const Bounds = struct { left: f32, top: f32, right: f32, bottom: f32 };
 
+/// A single pressure-tagged stylus sample. Lives here (rather than in
+/// window.zig, where decoded strokes are built) so both `window.zig` (which
+/// decodes points) and `tessellate.zig` (which turns them into fill
+/// polygons) can depend on it without depending on each other.
+pub const Point = struct { x: f32, y: f32, p: f32 };
+
 pub const Page = struct {
     id: []const u8,
     unbounded: bool,
     width: f32,
     height: f32,
     background_color: u32,
+    /// Union of every stroke/shape/text-box/image/link bounds placed on this
+    /// page, in the same page-local coordinate space those items report their
+    /// own bounds in. `null` if the page has no content. Unlike `width`/
+    /// `height` (which come from the app's declared `paper_spec`, often a
+    /// nominal placeholder like 1920x1920 for an infinite-canvas page, or
+    /// entirely absent), this reflects where ink actually is -- an unbounded
+    /// page's real coordinate space isn't `[0,width]x[0,height]`, it can
+    /// extend arbitrarily far in any direction including negative.
+    content_bounds: ?Bounds = null,
 };
 
 /// Cheap per-item index entry: bounds + page association + a reference back to
@@ -300,6 +315,12 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
     const links = try scanLinks(alloc, db, pages);
     const audio = try scanAudio(alloc, db, archive);
 
+    for (strokes) |e| expandContentBounds(pages, e.page_index, e.bounds);
+    for (shapes) |e| expandContentBounds(pages, e.page_index, e.bounds);
+    for (text_boxes) |e| expandContentBounds(pages, e.page_index, e.bounds);
+    for (images) |e| expandContentBounds(pages, e.page_index, e.bounds);
+    for (links) |e| expandContentBounds(pages, e.page_index, e.bounds);
+
     return .{
         .alloc = alloc,
         .archive = archive,
@@ -312,6 +333,19 @@ pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_byte
         .links = links,
         .audio = audio,
     };
+}
+
+fn expandContentBounds(pages: []Page, page_index: u32, b: Bounds) void {
+    if (page_index >= pages.len) return;
+    const p = &pages[page_index];
+    if (p.content_bounds) |*cb| {
+        cb.left = @min(cb.left, b.left);
+        cb.top = @min(cb.top, b.top);
+        cb.right = @max(cb.right, b.right);
+        cb.bottom = @max(cb.bottom, b.bottom);
+    } else {
+        p.content_bounds = b;
+    }
 }
 
 fn extractNoteUuid(db_entry_name: []const u8) ?[]const u8 {

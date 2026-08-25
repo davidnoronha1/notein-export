@@ -2,6 +2,7 @@ const std = @import("std");
 const model = @import("model.zig");
 const window = @import("window.zig");
 const raster = @import("raster.zig");
+const tessellate = @import("tessellate.zig");
 const zip = @import("zip.zig");
 const zip_writer = @import("zip_writer.zig");
 const big_alloc = @import("big_alloc.zig");
@@ -45,8 +46,35 @@ var g_asset_image_buf: []AssetImageDraw = &.{};
 var g_link_draw_buf: []LinkDraw = &.{};
 var g_audio_draw_buf: []AudioDraw = &.{};
 var g_media_zip_buf: []u8 = &.{};
+// Reused across every render_viewport/get_vector_content_count call instead
+// of allocating a fresh list each time -- panning/zooming calls this every
+// frame, and repeatedly alloc+free-ing a list sized to the page's full item
+// count is pure per-frame overhead on top of the actual cull/raster work.
+var g_filtered_order: std.array_list.Managed(window.DrawRef) = std.array_list.Managed(window.DrawRef).init(gpa);
+// Scratch for the grid path's order-index collection (see collectVisibleOrder) --
+// reused across calls for the same reason as g_filtered_order.
+var g_grid_hits: std.array_list.Managed(u32) = std.array_list.Managed(u32).init(gpa);
+// Monotonic counter for dedup during a grid query (see `collectVisibleOrder`):
+// an item spanning multiple visited grid cells must only be collected once.
+// Bumped once per query; compared against each item's `seen` stamp instead of
+// memset-ing that (page-sized) array back to 0 before every query.
+var g_cull_gen: u32 = 0;
 
-const PageInfo = extern struct { width: f32, height: f32, unbounded: u32, color: u32 };
+// stride 36: 4x f32 (width, height), 2x u32 (unbounded, color), 4x f32 content
+// bounds (left, top, right, bottom, page-local coords -- see
+// model.Page.content_bounds), u32 has_content flag (content bounds fields are
+// meaningless when 0, since a page with no ink has no real bounds to report).
+const PageInfo = extern struct {
+    width: f32,
+    height: f32,
+    unbounded: u32,
+    color: u32,
+    content_left: f32,
+    content_top: f32,
+    content_right: f32,
+    content_bottom: f32,
+    has_content: u32,
+};
 // creation_time is epoch milliseconds (fits exactly in f64's 53-bit mantissa,
 // unlike f32 which can't represent it precisely) -- used by JS to interleave
 // image/text compositing with ink rendering in true chronological/stacking order.
@@ -123,7 +151,18 @@ export fn get_page_info_ptr() u32 {
     gpa.free(g_page_info_buf);
     g_page_info_buf = gpa.alloc(PageInfo, s.note.pages.len) catch return 0;
     for (s.note.pages, 0..) |p, i| {
-        g_page_info_buf[i] = .{ .width = p.width, .height = p.height, .unbounded = if (p.unbounded) 1 else 0, .color = p.background_color };
+        const cb = p.content_bounds orelse model.Bounds{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+        g_page_info_buf[i] = .{
+            .width = p.width,
+            .height = p.height,
+            .unbounded = if (p.unbounded) 1 else 0,
+            .color = p.background_color,
+            .content_left = cb.left,
+            .content_top = cb.top,
+            .content_right = cb.right,
+            .content_bottom = cb.bottom,
+            .has_content = if (p.content_bounds != null) 1 else 0,
+        };
     }
     return @intFromPtr(g_page_info_buf.ptr);
 }
@@ -181,31 +220,89 @@ export fn render_viewport(
 
     if (s.win.get(page_index)) |content| {
         const cull = model.Bounds{ .left = x, .top = y, .right = x + w, .bottom = y + h };
-        // Filter the chronological draw order down to visible, in-range
-        // entries, but keep indices pointing at the original (unfiltered)
-        // strokes/shapes arrays -- that's what content.order's indices are
-        // relative to.
-        var filtered_order = std.array_list.Managed(window.DrawRef).initCapacity(gpa, content.order.len) catch return @intFromPtr(g_canvas_buf.ptr);
-        defer filtered_order.deinit();
-        for (content.order) |ref| {
-            const bounds, const time = switch (ref.kind) {
-                .stroke => .{ content.strokes[ref.index].bounds, content.strokes[ref.index].creation_time },
-                .shape => .{ content.shapes[ref.index].bounds, content.shapes[ref.index].creation_time },
-            };
-            const t: f64 = @floatFromInt(time);
-            if (intersects(bounds, cull) and t >= time_min and t < time_max) filtered_order.append(ref) catch {};
-        }
+        collectVisibleOrder(content, cull, time_min, time_max, &g_filtered_order);
 
         const min_width_world: f32 = if (min_stroke_px > 0) min_stroke_px / scale else 0;
         raster.renderPageContent(canvas, .{
             .strokes = content.strokes,
             .shapes = content.shapes,
             .text_boxes = &.{}, // text is drawn natively by JS via get_visible_textbox_*
-            .order = filtered_order.items,
+            .order = g_filtered_order.items,
         }, min_width_world);
     }
 
     return @intFromPtr(g_canvas_buf.ptr);
+}
+
+/// Fills `out` with the entries of `content.order` whose bounds intersect
+/// `cull` and whose creation_time falls in `[time_min, time_max)` -- the
+/// per-frame cull step shared by `render_viewport` and
+/// `get_vector_content_count`. Uses `content.grid` (built once at decode
+/// time, see window.zig) to visit only nearby items when available, instead
+/// of scanning every item on the page; falls back to a full linear scan for
+/// an empty/ungridded page (nothing to gain from a grid there anyway).
+fn collectVisibleOrder(content: window.PageContent, cull: model.Bounds, time_min: f64, time_max: f64, out: *std.array_list.Managed(window.DrawRef)) void {
+    out.clearRetainingCapacity();
+
+    if (content.grid.cols == 0 or content.seen.len != content.order.len) {
+        for (content.order) |ref| {
+            const bounds, const time = switch (ref.kind) {
+                .stroke => .{ content.strokes[ref.index].bounds, content.strokes[ref.index].creation_time },
+                .shape => .{ content.shapes[ref.index].bounds, content.shapes[ref.index].creation_time },
+            };
+            const t: f64 = @floatFromInt(time);
+            if (intersects(bounds, cull) and t >= time_min and t < time_max) out.append(ref) catch {};
+        }
+        return;
+    }
+
+    g_cull_gen += 1;
+    const gen = g_cull_gen;
+    const grid = content.grid;
+    const cx0 = gridCellIndex(cull.left, grid.min_x, grid.cell_w, grid.cols);
+    const cx1 = gridCellIndex(cull.right, grid.min_x, grid.cell_w, grid.cols);
+    const cy0 = gridCellIndex(cull.top, grid.min_y, grid.cell_h, grid.rows);
+    const cy1 = gridCellIndex(cull.bottom, grid.min_y, grid.cell_h, grid.rows);
+
+    // Cells are visited in raster (row-major) order, not creation_time order,
+    // so collect the hit order-indices first and sort them before appending
+    // -- `order`'s index IS its creation_time rank (it was built pre-sorted,
+    // see window.zig's decodePage), so sorting these indices ascending
+    // restores exactly the chronological/stacking order `renderPageContent`
+    // (and the caller's overlay-interleaving) depends on. Skipping this
+    // would silently draw overlapping ink in the wrong stacking order
+    // whenever a query happens to touch more than one grid cell.
+    g_grid_hits.clearRetainingCapacity();
+    var cy = cy0;
+    while (cy <= cy1) : (cy += 1) {
+        var cx = cx0;
+        while (cx <= cx1) : (cx += 1) {
+            const cell = cy * grid.cols + cx;
+            for (grid.cell_items[grid.cell_start[cell]..grid.cell_start[cell + 1]]) |order_idx| {
+                if (content.seen[order_idx] == gen) continue;
+                content.seen[order_idx] = gen;
+                g_grid_hits.append(order_idx) catch {};
+            }
+        }
+    }
+    std.mem.sort(u32, g_grid_hits.items, {}, std.sort.asc(u32));
+
+    for (g_grid_hits.items) |order_idx| {
+        const ref = content.order[order_idx];
+        const bounds, const time = switch (ref.kind) {
+            .stroke => .{ content.strokes[ref.index].bounds, content.strokes[ref.index].creation_time },
+            .shape => .{ content.shapes[ref.index].bounds, content.shapes[ref.index].creation_time },
+        };
+        const t: f64 = @floatFromInt(time);
+        if (intersects(bounds, cull) and t >= time_min and t < time_max) out.append(ref) catch {};
+    }
+}
+
+fn gridCellIndex(world: f32, min: f32, cell_size: f32, n: u32) u32 {
+    const f = (world - min) / cell_size;
+    if (f <= 0) return 0;
+    const fi: u32 = @intFromFloat(@floor(f));
+    return @min(fi, n - 1);
 }
 
 /// Returns the strokes+shapes intersecting the world-space viewport rect AND
@@ -222,28 +319,29 @@ export fn get_vector_content_count(page_index: u32, x: f32, y: f32, w: f32, h: f
     var verts = std.array_list.Managed(f32).init(gpa);
 
     if (s.win.get(page_index)) |content| {
-        for (content.order) |ref| {
+        collectVisibleOrder(content, cull, time_min, time_max, &g_filtered_order);
+        for (g_filtered_order.items) |ref| {
             switch (ref.kind) {
                 .stroke => {
                     const st = content.strokes[ref.index];
                     const t: f64 = @floatFromInt(st.creation_time);
-                    if (!intersects(st.bounds, cull) or t < time_min or t >= time_max) continue;
-                    const poly = raster.tessellateStrokeScratch(st.points, st.width);
+                    // Reuse the polygon already tessellated at decode time
+                    // (see window.zig's decodeStroke) instead of redoing it.
+                    const poly = if (st.tess_poly.len >= 3) st.tess_poly else tessellate.tessellateStrokeScratch(st.points, st.width);
                     if (poly.len < 3) continue;
                     appendPoly(&polys, &verts, st.color, t, poly) catch break;
                 },
                 .shape => {
                     const sh = content.shapes[ref.index];
                     const t: f64 = @floatFromInt(sh.creation_time);
-                    if (!intersects(sh.bounds, cull) or t < time_min or t >= time_max) continue;
                     if (sh.points.len >= 3) {
                         var i: usize = 0;
                         while (i < sh.points.len) : (i += 1) {
-                            const quad = raster.quadForLine(sh.points[i], sh.points[(i + 1) % sh.points.len], sh.width);
+                            const quad = tessellate.quadForLine(sh.points[i], sh.points[(i + 1) % sh.points.len], sh.width);
                             appendPoly(&polys, &verts, sh.color, t, &quad) catch break;
                         }
                     } else if (sh.points.len == 2) {
-                        const quad = raster.quadForLine(sh.points[0], sh.points[1], sh.width);
+                        const quad = tessellate.quadForLine(sh.points[0], sh.points[1], sh.width);
                         appendPoly(&polys, &verts, sh.color, t, &quad) catch {};
                     }
                 },
