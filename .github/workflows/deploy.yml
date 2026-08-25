@@ -13,12 +13,13 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
         with:
-          # Pinned to the exact dev build this repo's wasm/build.zig is
-          # verified against locally. Zig's nightly index only retains
-          # recent builds, so if this version ever 404s, re-pin to the
-          # current `zig version` output after confirming `zig build test`
-          # still passes locally.
-          version: 0.17.0-dev.1859+dcceb318e
+          # This repo relies on very recent std APIs (std.array_list.Managed,
+          # std.Io.Dir, ...) that only exist on Zig's nightly master branch --
+          # no stable release supports them yet. "master" always resolves to
+          # today's nightly; if a future nightly breaks the build, pin to a
+          # known-good version string from https://ziglang.org/download/index.json
+          # (verify with `zig build test` locally first).
+          version: master
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
