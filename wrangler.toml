@@ -1,5 +1,6 @@
 name = "noteinexport"
 compatibility_date = "2025-08-24"
+account_id = "1f0e523192edd0f059387b4711792ecc"
 
 [assets]
 directory = "./web/dist"
