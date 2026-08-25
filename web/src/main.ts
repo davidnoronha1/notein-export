@@ -231,9 +231,16 @@ async function main(): Promise<void> {
     const p1 = viewport.screenToWorld(screenRight, screenBottom);
     pendingRect = { x: p0.x, y: p0.y, w: p1.x - p0.x, h: p1.y - p0.y };
 
-    exportPanelEl.style.left = `${Math.min(rect.width - 8, screenRight + 8)}px`;
-    exportPanelEl.style.top = `${Math.max(8, screenTop)}px`;
+    // Show first so getBoundingClientRect() below reflects the panel's real
+    // size -- centering/clamping needs the actual width, not a guess.
     exportPanelEl.classList.remove("hidden");
+    const panelRect = exportPanelEl.getBoundingClientRect();
+    const centerX = (screenLeft + screenRight) / 2;
+    const left = Math.max(8, Math.min(rect.width - panelRect.width - 8, centerX - panelRect.width / 2));
+    const fitsBelow = screenBottom + 8 + panelRect.height <= rect.height - 8;
+    const top = fitsBelow ? screenBottom + 8 : Math.max(8, screenTop - panelRect.height - 8);
+    exportPanelEl.style.left = `${left}px`;
+    exportPanelEl.style.top = `${top}px`;
   });
 
   exportRegionCancelEl.addEventListener("click", () => {
