@@ -1,4 +1,5 @@
 import type { PageInfo } from "../wasm/loader";
+import type { Viewport } from "./viewport";
 
 export interface PageLayout {
   index: number;
@@ -54,4 +55,27 @@ export function visiblePages(layout: NoteLayout, x: number, y: number, w: number
   const right = x + w;
   const bottom = y + h;
   return layout.pages.filter((p) => p.x <= right && p.x + p.width >= x && p.y <= bottom && p.y + p.height >= y);
+}
+
+/** Pans/zooms the viewport to frame a page-local bounds rect (an image,
+ * link, etc.), converting it to world space via the page's layout offset. */
+export function frameToBounds(
+  viewport: Viewport,
+  layout: NoteLayout,
+  pageIndex: number,
+  bounds: { left: number; top: number; right: number; bottom: number },
+  canvas: HTMLCanvasElement,
+): void {
+  const page = layout.pages[pageIndex];
+  if (!page) return;
+  const pad = 40;
+  const rect = canvas.getBoundingClientRect();
+  viewport.frame(
+    page.x + bounds.left - pad,
+    page.y + bounds.top - pad,
+    bounds.right - bounds.left + pad * 2,
+    bounds.bottom - bounds.top + pad * 2,
+    rect.width,
+    rect.height,
+  );
 }
