@@ -8,6 +8,7 @@ import type { WorldRect } from "./canvas/export-render";
 import { exportRegionPdf, exportRegionPng, exportRegionSvg, type ExportScale } from "./export";
 import { formatStats } from "./stats";
 import { nextPaint } from "./util";
+import { darkMode } from "./theme";
 
 const ZOOM_STEP_FACTOR = 1.25;
 // Log-scale mapping so the slider gives fine control at low zoom and still
@@ -20,7 +21,7 @@ function zoomToSlider(zoom: number): number {
   return (100 * Math.log(zoom / MIN_ZOOM)) / ZOOM_LOG_RANGE;
 }
 
-export const DEFAULT_DROP_MESSAGE = "Drag & drop a Notein .in file here";
+export const DEFAULT_DROP_MESSAGE = "Drag & drop a Notein .in or Nebo .nebo file here";
 
 export interface ScreenRect {
   left: number;
@@ -66,6 +67,9 @@ export class AppController {
    * page -> freeform) so App.tsx can style the minimap container to match
    * what Minimap actually renders inside it -- see index.html's #minimap.free. */
   readonly minimapFreeform = signal(false);
+  /** True when the loaded note is a Nebo `.nebo` document -- the dark-mode/
+   * invert-ink toggle only applies to Nebo notes (see toggleDarkMode). */
+  readonly isNebo = signal(false);
 
   readonly dropZoneVisible = signal(true);
   readonly dropZoneLoading = signal(false);
@@ -250,6 +254,27 @@ export class AppController {
     this.exportPanelPos.value = { left: centerX, top: screenBottom + 8 };
   }
 
+  // --- Dark mode (Nebo notes only) -----------------------------------------
+
+  /** Flips dark mode: wasm inverts ink/textbox colors, JS flips background
+   * fills, and the minimap regenerates its thumbnails. Nebo-only -- a `.in`
+   * note's authored paper colors are meaningful content, not chrome. */
+  toggleDarkMode(): void {
+    if (!this.isNebo.value || !this.wasm) return;
+    darkMode.value = !darkMode.value;
+    try {
+      this.wasm.setInvertColors(darkMode.value);
+      this.renderer?.requestRender();
+      this.minimap?.redraw();
+    } catch (err) {
+      console.error(err);
+      // Revert the signal so icon and state stay consistent with what's
+      // actually on screen (e.g. a stale cached wasm without the export).
+      darkMode.value = !darkMode.value;
+      this.status.value = `Dark mode failed: ${(err as Error).message}`;
+    }
+  }
+
   // --- Export ---------------------------------------------------------------
 
   private async withBusy(busy: Signal<boolean>, fn: () => Promise<void>): Promise<void> {
@@ -306,6 +331,14 @@ export class AppController {
       this.wasm!.openFile(bytes);
       this.dropZoneVisible.value = false;
 
+      // Dark mode is Nebo-only: reset it (both the signal and wasm's ink
+      // inversion) when a .in note replaces a previously-dark Nebo note.
+      this.isNebo.value = this.wasm!.isNebo();
+      if (!this.isNebo.value && darkMode.value) {
+        darkMode.value = false;
+        this.wasm!.setInvertColors(false);
+      }
+
       this.renderer = new Renderer(this.wasm!, this.canvasEl!, this.viewport!);
       this.renderer.showWholeNote();
       this.minimap = new Minimap(
@@ -339,6 +372,7 @@ export class AppController {
       this.noteLoaded.value = false;
       this.notePageExportPossible.value = false;
       this.minimapFreeform.value = false;
+      this.isNebo.value = false;
       this.dropZoneVisible.value = true;
       this.cancelSelection();
       this.noteVersion.value++;

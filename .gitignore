@@ -5,4 +5,7 @@ zig-out/
 .wrangler/
 web/src/wasm/*.wasm
 *.in
+*.nebo
 fixtures/*.in
+fixtures/*.nebo
+*.png

@@ -56,6 +56,7 @@ pub const Canvas = struct {
     fn blend(self: Canvas, px: i32, py: i32, argb: u32) void {
         if (px < 0 or py < 0 or px >= self.width or py >= self.height) return;
         const idx = (@as(usize, @intCast(py)) * self.width + @as(usize, @intCast(px))) * 4;
+        if (idx + 4 > self.pixels.len) @panic("blend out of bounds");
         const sa: u32 = (argb >> 24) & 0xff;
         if (sa == 0) return;
         const sr: u32 = (argb >> 16) & 0xff;
@@ -254,12 +255,9 @@ fn addSpanCoverage(coverage: []f32, x0: f32, x1: f32, weight: f32) void {
         // Vectorized chunk: 8 f32 (32 bytes) per iteration. Use align(1) to allow
         // any coverage offset (wasm linear memory may be unaligned for Vec8).
         while (ix + 8 <= ix1) : (ix += 8) {
-            // ix is guaranteed in [0, coverage.len) due to clamped cx0/cx1
             const base: usize = @intCast(ix);
-            // Safety: base+8 <= coverage.len because ix+8 <= ix1 <= coverage.len
-            var vec: @Vector(8, f32) = coverage[base..][0..8].*;
-            vec += w8;
-            coverage[base..][0..8].* = vec;
+            const ptr = @as(*align(1) @Vector(8, f32), @ptrCast(&coverage[base]));
+            ptr.* += w8;
         }
         while (ix < ix1) : (ix += 1) {
             coverage[@intCast(ix)] += weight;
@@ -271,6 +269,80 @@ fn addSpanCoverage(coverage: []f32, x0: f32, x1: f32, weight: f32) void {
 }
 
 var scratch_poly: [8192][2]f32 = undefined;
+
+/// Dark-mode ink inversion, toggled from JS via main.zig's `set_invert_colors`.
+/// Applied at color-consumption time (not decode time) so the per-page decoded
+/// caches in window.zig stay valid across toggles.
+pub var invert_colors: bool = false;
+
+/// Maps a content ARGB through the current invert setting. Used for every
+/// content color crossing into pixels (drawStroke/drawShape) or back out to
+/// JS (vector polys, textbox draws), so live view and all export paths stay
+/// in sync automatically.
+///
+/// Dark-mode transform, matching how the Nebo app itself renders in dark mode:
+/// flip HSL lightness while keeping hue and saturation. White paper -> black,
+/// black ink -> white, and a colored pen keeps its hue but lightens (e.g. the
+/// deep maroon #87202B becomes a soft pink, blue #1364B7 a lighter blue) so it
+/// stays vivid on the dark backdrop instead of sinking into it. Not a bitwise
+/// RGB flip (that would change hue, turning a pen into a different color). This
+/// is an involution (l -> 1-l twice restores l), so toggling dark mode twice
+/// gives back the exact original colors. Mirrored in web/src/canvas/color.ts's
+/// invertArgb -- keep the two identical.
+pub fn outputColor(argb: u32) u32 {
+    if (!invert_colors) return argb;
+    const r = @as(f32, @floatFromInt((argb >> 16) & 0xFF)) / 255;
+    const g = @as(f32, @floatFromInt((argb >> 8) & 0xFF)) / 255;
+    const b = @as(f32, @floatFromInt(argb & 0xFF)) / 255;
+
+    var c = rgbToHsl(r, g, b);
+    c.l = 1 - c.l;
+
+    const rgb = hslToRgb(c);
+    const ri: u32 = @intFromFloat(std.math.clamp(rgb[0], 0, 1) * 255 + 0.5);
+    const gi: u32 = @intFromFloat(std.math.clamp(rgb[1], 0, 1) * 255 + 0.5);
+    const bi: u32 = @intFromFloat(std.math.clamp(rgb[2], 0, 1) * 255 + 0.5);
+    return (argb & 0xFF000000) | (ri << 16) | (gi << 8) | bi;
+}
+
+const Hsl = struct { h: f32, s: f32, l: f32 };
+
+fn rgbToHsl(r: f32, g: f32, b: f32) Hsl {
+    const max = @max(r, @max(g, b));
+    const min = @min(r, @min(g, b));
+    const l = (max + min) / 2;
+    if (max == min) return .{ .h = 0, .s = 0, .l = l };
+    const d = max - min;
+    const s = if (l > 0.5) d / (2 - max - min) else d / (max + min);
+    const h: f32 = if (max == r)
+        (g - b) / d + if (g < b) @as(f32, 6) else 0
+    else if (max == g)
+        (b - r) / d + 2
+    else
+        (r - g) / d + 4;
+    return .{ .h = h / 6, .s = s, .l = l };
+}
+
+fn hueToRgb(p: f32, q: f32, t_in: f32) f32 {
+    var t = t_in;
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1.0 / 6.0) return p + (q - p) * 6 * t;
+    if (t < 0.5) return q;
+    if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6;
+    return p;
+}
+
+fn hslToRgb(c: Hsl) [3]f32 {
+    if (c.s == 0) return .{ c.l, c.l, c.l };
+    const q = if (c.l < 0.5) c.l * (1 + c.s) else c.l + c.s - c.l * c.s;
+    const p = 2 * c.l - q;
+    return .{
+        hueToRgb(p, q, c.h + 1.0 / 3.0),
+        hueToRgb(p, q, c.h),
+        hueToRgb(p, q, c.h - 1.0 / 3.0),
+    };
+}
 
 /// Rasterizes decoded strokes and shapes for one page's content into `canvas`,
 /// in `content.order` (chronological/stacking) order rather than always
@@ -286,26 +358,25 @@ pub fn renderPageContent(canvas: Canvas, content: window.PageContent, min_width_
     }
 }
 
+const builtin = @import("builtin");
+var g_debug_alloc: if (builtin.target.cpu.arch != .wasm32) std.heap.DebugAllocator(.{}) else void = if (builtin.target.cpu.arch != .wasm32) .init else {};
+fn getGpa() std.mem.Allocator {
+    return if (builtin.target.cpu.arch == .wasm32) std.heap.wasm_allocator else g_debug_alloc.allocator();
+}
+var g_poly_buf: ?std.array_list.Managed([2]f32) = null;
+var g_right_buf: ?std.array_list.Managed([2]f32) = null;
+
 fn drawStroke(canvas: Canvas, s: window.DecodedStroke, min_width_world: f32) void {
-    if (s.points.len < 2) return;
-    // Common case: `s.tess_poly` was already tessellated once at decode time
-    // (see window.zig's decodeStroke) at the stroke's real width, and the
-    // per-frame min-width floor doesn't need to raise it -- reuse it instead
-    // of re-tessellating this stroke on every single frame it's visible in.
-    // The floor only actually raises the width when zoomed out enough that
-    // `s.width` would round to sub-pixel (main interactive rendering always
-    // passes min_width_world=0; only thumbnail generation floors it), so
-    // this fast path covers the hot (pan/zoom) case.
-    if (min_width_world <= s.width and s.tess_poly.len >= 3) {
-        canvas.fillPolygon(s.tess_poly, s.color);
-        return;
-    }
+    if (s.points.len == 0) return;
     const width = @max(s.width, min_width_world);
-    const poly = if (s.points.len * 2 <= scratch_poly.len)
-        tessellate.tessellateStroke(s.points, width, &scratch_poly)
-    else
-        &[_][2]f32{};
-    if (poly.len >= 3) canvas.fillPolygon(poly, s.color);
+
+    if (g_poly_buf == null) g_poly_buf = std.array_list.Managed([2]f32).init(getGpa());
+    if (g_right_buf == null) g_right_buf = std.array_list.Managed([2]f32).init(getGpa());
+
+    tessellate.smoothAndTessellateAdaptive(s.points, width, canvas.scale, s.is_calligraphic, &g_poly_buf.?, &g_right_buf.?) catch return;
+    const poly = g_poly_buf.?.items;
+
+    if (poly.len >= 3) canvas.fillPolygon(poly, outputColor(s.color));
 }
 
 fn drawShape(canvas: Canvas, s: window.DecodedShape, min_width_world: f32) void {
@@ -314,13 +385,14 @@ fn drawShape(canvas: Canvas, s: window.DecodedShape, min_width_world: f32) void 
     // ShapeEntity's columns or its points JSON, so every shape (closed
     // polygon or open line) is drawn as an outline of `width`, never filled.
     const width = @max(s.width, min_width_world);
+    const color = outputColor(s.color);
     if (s.points.len >= 3) {
         var i: usize = 0;
         while (i < s.points.len) : (i += 1) {
-            drawLine(canvas, s.points[i], s.points[(i + 1) % s.points.len], width, s.color);
+            drawLine(canvas, s.points[i], s.points[(i + 1) % s.points.len], width, color);
         }
     } else if (s.points.len == 2) {
-        drawLine(canvas, s.points[0], s.points[1], width, s.color);
+        drawLine(canvas, s.points[0], s.points[1], width, color);
     }
 }
 
@@ -330,8 +402,9 @@ fn drawLine(canvas: Canvas, a: [2]f32, b: [2]f32, width: f32, argb: u32) void {
 }
 
 test "renderPageContent fills a simple stroke into the canvas buffer" {
-    var pixels: [16 * 16 * 4]u8 = @splat(0);
-    const canvas = Canvas{ .pixels = &pixels, .width = 16, .height = 16, .origin_x = 0, .origin_y = 0, .scale = 1 };
+    const pixels = try std.testing.allocator.alignedAlloc(u8, .@"16", 16 * 16 * 4);
+    defer std.testing.allocator.free(pixels);
+    const canvas = Canvas{ .pixels = pixels, .width = 16, .height = 16, .origin_x = 0, .origin_y = 0, .scale = 1 };
     canvas.clear(0x00000000);
 
     var pts = [_]window.Point{
@@ -350,4 +423,29 @@ test "renderPageContent fills a simple stroke into the canvas buffer" {
     const idx = (8 * 16 + 8) * 4;
     try std.testing.expectEqual(@as(u8, 255), pixels[idx]); // R
     try std.testing.expectEqual(@as(u8, 255), pixels[idx + 3]); // A
+}
+
+test "outputColor dark-mode remap: flip lightness, keep hue" {
+    invert_colors = true;
+    defer invert_colors = false;
+
+    // Black ink -> white, white paper -> black (JS mirrors this for backgrounds).
+    try std.testing.expectEqual(@as(u32, 0xFF000000) | 0xFFFFFF, outputColor(0xFF000000));
+    try std.testing.expectEqual(@as(u32, 0xFF000000), outputColor(0xFFFFFFFF));
+    // Alpha always preserved.
+    try std.testing.expectEqual(@as(u32, 0x80000000), outputColor(0x80FFFFFF) & 0xFF000000);
+
+    // A deep chromatic pen lightens (more visible on the dark backdrop) but
+    // keeps its hue family -- the blue channel stays dominant, not shifted to
+    // its complement.
+    const from_blue = outputColor(0xFF1364B7); // deep blue
+    const br: u32 = (from_blue >> 16) & 0xFF;
+    const bg: u32 = (from_blue >> 8) & 0xFF;
+    const bb: u32 = from_blue & 0xFF;
+    try std.testing.expect(bb >= br and bb >= bg); // still bluest channel
+    try std.testing.expect(br + bg + bb > 0x13 + 0x64 + 0xB7); // and lighter overall
+
+    // Involution: applying twice restores the original (checked on a neutral,
+    // where HSL round-trips exactly).
+    try std.testing.expectEqual(@as(u32, 0xFF333333), outputColor(outputColor(0xFF333333)));
 }

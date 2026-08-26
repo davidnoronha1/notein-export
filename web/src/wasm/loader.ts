@@ -10,7 +10,9 @@ interface NoteinExports {
   open(ptr: number, len: number): number;
   get_page_count(): number;
   get_page_info_ptr(): number;
+  is_nebo(): number;
   set_active_window(ptr: number, count: number): void;
+  set_invert_colors(v: number): void;
   render_viewport(
     pageIndex: number,
     x: number,
@@ -147,13 +149,20 @@ export class NoteinModule {
     return new TextDecoder().decode(new Uint8Array(this.memory, ptr, len));
   }
 
-  /** Loads a `.in` file's bytes. Throws if the file can't be parsed. */
+  /** Loads a note file's bytes (a Notein `.in` or a Nebo `.nebo` -- the wasm
+   * core sniffs the container and picks the right decoder). Throws if the file
+   * can't be parsed. */
   openFile(bytes: Uint8Array): void {
     const ptr = this.exports.alloc(bytes.length);
     if (ptr === 0 && bytes.length > 0) throw new Error("wasm alloc failed");
     new Uint8Array(this.memory, ptr, bytes.length).set(bytes);
     const status = this.exports.open(ptr, bytes.length);
-    if (status !== 0) throw new Error(`failed to parse .in file (status ${status})`);
+    if (status !== 0) throw new Error(`failed to parse note file (status ${status})`);
+  }
+
+  /** True when the loaded note is a Nebo `.nebo` document (gates Nebo-only UI). */
+  isNebo(): boolean {
+    return this.exports.is_nebo() !== 0;
   }
 
   getPages(): PageInfo[] {
@@ -188,6 +197,12 @@ export class NoteinModule {
     const ptr = this.exports.alloc(arr.byteLength);
     new Uint32Array(this.memory, ptr, arr.length).set(arr);
     this.exports.set_active_window(ptr, arr.length);
+  }
+
+  /** Toggles dark-mode ink inversion (wasm-side; applies to raster ink,
+   * vector export polys, and textbox draws alike). Backgrounds are JS-side. */
+  setInvertColors(enabled: boolean): void {
+    this.exports.set_invert_colors(enabled ? 1 : 0);
   }
 
   /**

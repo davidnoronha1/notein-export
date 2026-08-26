@@ -1,7 +1,8 @@
 import type { ImageDraw, NoteinModule, TextBoxDraw, VectorPoly } from "../wasm/loader";
-import { argbToCss } from "./color";
+import { argbToCss, invertArgb } from "./color";
 import { visiblePages, type NoteLayout, type PageLayout } from "./layout";
 import { bytesToBase64, xmlEscape } from "../util";
+import { darkMode } from "../theme";
 
 export interface WorldRect {
   x: number;
@@ -36,6 +37,21 @@ const MAX_EXPORT_PIXELS = 40_000_000;
 
 /** Reduces `pixelsPerUnit` if needed so the output canvas stays within
  * MAX_EXPORT_DIMENSION per side and MAX_EXPORT_PIXELS total. */
+/** Backdrop for an export: black document-viewer gutter for bounded notes, or
+ * the page's own color for an infinite-canvas note (which has no gutter) so
+ * dark ink stays visible. Mirrors the on-screen renderer's clear color,
+ * including dark mode's background inversion (see theme.ts). */
+function backdropColor(layout: NoteLayout): string {
+  const allUnbounded = layout.pages.length > 0 && layout.pages.every((p) => p.unbounded);
+  const first = layout.pages[0]!;
+  return allUnbounded ? argbToCss(darkMode.value ? invertArgb(first.color) : first.color) : "#000000";
+}
+
+/** A page's background ARGB, flipped in dark mode (mirrors Renderer). */
+function pageColor(page: PageLayout): number {
+  return darkMode.value ? invertArgb(page.color) : page.color;
+}
+
 export function clampExportScale(rect: WorldRect, pixelsPerUnit: number): number {
   let scale = pixelsPerUnit;
   scale = Math.min(scale, MAX_EXPORT_DIMENSION / Math.max(1, rect.w));
@@ -58,7 +74,9 @@ export async function renderRegionToCanvas(
   out.width = outW;
   out.height = outH;
   const ctx = out.getContext("2d")!;
-  ctx.fillStyle = "#000000";
+  // Infinite-canvas notes have no page gutter -- back them with the page color
+  // (matches the on-screen renderer) so dark ink isn't lost on a black backdrop.
+  ctx.fillStyle = backdropColor(layout);
   ctx.fillRect(0, 0, outW, outH);
 
   const imageCache = new Map<string, ImageBitmap | null>();
@@ -106,7 +124,7 @@ async function renderPageInto(
   const screenY = (vy0 - rect.y) * pixelsPerUnit;
 
   if (!page.unbounded) {
-    ctx.fillStyle = argbToCss(page.color);
+    ctx.fillStyle = argbToCss(pageColor(page));
     ctx.fillRect(screenX, screenY, pixelW, pixelH);
   }
 
@@ -221,7 +239,7 @@ export async function renderRegionToSvg(wasm: NoteinModule, layout: NoteLayout, 
 
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${rect.w}" height="${rect.h}" viewBox="0 0 ${rect.w} ${rect.h}">`,
-    `<rect x="0" y="0" width="${rect.w}" height="${rect.h}" fill="#000000" />`,
+    `<rect x="0" y="0" width="${rect.w}" height="${rect.h}" fill="${backdropColor(layout)}" />`,
     ...parts,
     `</svg>`,
   ].join("\n");
@@ -252,7 +270,7 @@ async function appendPageSvg(
   if (!page.unbounded) {
     const screenX = vx0 - rect.x;
     const screenY = vy0 - rect.y;
-    parts.push(`<rect x="${screenX}" y="${screenY}" width="${vw}" height="${vh}" fill="${argbToCss(page.color)}" />`);
+    parts.push(`<rect x="${screenX}" y="${screenY}" width="${vw}" height="${vh}" fill="${argbToCss(pageColor(page))}" />`);
   }
 
   const ink = wasm.getVectorContent(page.index, localX, localY, vw, vh);

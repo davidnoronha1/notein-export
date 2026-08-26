@@ -4,10 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A browser-based viewer/exporter for **Notein** (`.in`) handwriting-note exports. Everything runs
-client-side: a Zig core compiled to WASM unzips the `.in` container, replays its SQLite database, and
-rasterizes ink; a Preact/TS frontend drives pan/zoom/export/panels around it. No server-side processing —
-files never leave the browser. Deployed as static assets on Cloudflare Workers.
+A browser-based viewer/exporter for **Notein** (`.in`) handwriting-note exports, and for **Nebo**
+(`.nebo`) exports. Everything runs client-side: a Zig core compiled to WASM unzips the container, and —
+for `.in` — replays its SQLite database, then rasterizes ink; a Preact/TS frontend drives
+pan/zoom/export/panels around it. No server-side processing — files never leave the browser. Deployed as
+static assets on Cloudflare Workers.
+
+The wasm `open` export sniffs the container and dispatches: `.in` (SQLite-backed) vs `.nebo` (MyScript
+BINK ink stream). Both produce the same `model.Note`, so the entire window/raster/export/frontend pipeline
+downstream is shared — see the Nebo section under Architecture.
 
 ## Commands
 
@@ -29,9 +34,11 @@ zig build test                              # unit tests (root.zig)
 zig build test -- --test-filter diary       # integration tests, need a local .in fixture
 ```
 
-Integration tests (`integration_test.zig`, `model_integration_test.zig`, `window_integration_test.zig`)
-read `.in` fixtures and skip gracefully if none are present. To enable them locally, drop any `.in` export
-as `fixtures/diary.in` (or matching name) — `fixtures/*.in` is git-ignored, never commit note samples.
+Integration tests (`integration_test.zig`, `model_integration_test.zig`, `window_integration_test.zig`,
+`nebo_integration_test.zig`) read fixtures and skip gracefully if none are present. To enable them locally,
+drop any `.in` export as `fixtures/diary.in` and/or any `.nebo` export as `fixtures/memy.nebo` — `*.in`/
+`*.nebo` under `fixtures/` are git-ignored, never commit note samples. `nebo_integration_test.zig` asserts
+the NEBO_FORMAT.md §21 validation invariants and that ink actually rasterizes to non-empty pixels.
 
 This repo requires a **nightly Zig** (`master` in CI via `mlugg/setup-zig@v2`) — it uses very recent std
 APIs (`std.array_list.Managed`, `std.Io.Dir`, ...) not present in any stable release. If the build breaks
@@ -93,6 +100,32 @@ the intersection of the *box*, not the actual content, ink outside the guessed b
 no matter how far the camera pans — this is the root cause behind reports of "content left of/above the
 first page never loads." A real fix needs an aggregate content-bounds pass (over strokes/shapes/images/text
 per page) surfaced from `model.zig`, not just a bigger guessed box.
+
+### Nebo (`.nebo`) support
+
+`wasm/src/nebo.zig` is the entire Nebo-specific layer. A `.nebo` file is a ZIP whose ink lives in
+`pages/<id>/ink.bink` (MyScript's proprietary "BINK" stream), *not* in a SQLite db. `model.open` detects
+this (`nebo.isNebo`) and hands off to `nebo.open`, which decodes the **raw stroke region** of each
+`ink.bink` — the part that is fully reverse-engineered (see `NEBO_FORMAT.md`): a 30-byte header per stroke
+(timestamp, initial x/y, point count) followed by `int16[N]` dx / `int16[N]` dy (1/512 fixed-point deltas)
+/ `uint8[N]` pressure. These become `model.NeboStroke`s attached to `Note.nebo_pages`; `window.zig`'s
+`decodePage` runs them through the *same* smoothing + tessellation as `.in` strokes, so raster, vector
+export, culling, and the minimap are all shared for free. Nebo pages are infinite-canvas (`unbounded`),
+laid out from `content_bounds` (the real ink extent) exactly like an unbounded `.in` page.
+
+**Pen colors** are resolved from the semantic stream after the raw region (`applyStyleColors`): the
+`LAYOUT_STROKES` sections enumerate all 767 strokes' semantic indices — sorted+deduped ascending, the k-th
+index *is* raw stroke k — and each color `.STYLE` object carries a set of 16-byte stroke-index ranges (§12)
+plus a CSS `color:#RRGGBBAA`. Mapping the range indices through the layout enumeration to raw-stroke ranks
+gives each stroke its ARGB. This is entirely defensive: if `LAYOUT_STROKES` doesn't enumerate exactly the
+strokes we decoded, or anything fails to parse, strokes keep the default black — a wrong color is worse than
+a missing one. `NEBO_FORMAT.md`'s claim that this mapping is "unresolved" is out of date; the file's
+uncertainty was about the *tagged-reference* graph, but `LAYOUT_STROKES` turned out to be a clean direct
+enumeration.
+
+Still not decoded: recognition text (CHAR/WORD/TEXT_LINE), diagram JSON (§17), and the per-stroke
+tilt/orientation header fields (§7) — none needed to render ink. Nebo notes have no
+images/links/audio/text-boxes, so those panels are simply empty.
 
 ### Rendering pipeline (`Renderer.render()` in `renderer.ts`)
 

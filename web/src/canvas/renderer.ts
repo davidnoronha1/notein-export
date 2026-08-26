@@ -1,8 +1,9 @@
 import type { ImageDraw, NoteinModule, TextBoxDraw } from "../wasm/loader";
-import { argbToCss } from "./color";
+import { argbToCss, invertArgb } from "./color";
 import { layoutNote, visiblePages, type NoteLayout, type PageLayout } from "./layout";
 import type { Viewport } from "./viewport";
 import { FrameStats } from "../stats";
+import { darkMode } from "../theme";
 
 type Overlay = ({ kind: "image"; item: ImageDraw } | { kind: "text"; item: TextBoxDraw }) & { creationTime: number };
 
@@ -19,6 +20,10 @@ const INTERACTION_LOD_SCALE = 0.5;
 
 export class Renderer {
   readonly layout: NoteLayout;
+  /** True when every page is infinite-canvas (e.g. a Nebo note, or an unbounded
+   * `.in` note) -- there's no page gutter, so the canvas clears to the page
+   * color rather than the black document-viewer backdrop. */
+  private readonly allUnbounded: boolean;
   readonly stats = new FrameStats();
   private readonly ctx: CanvasRenderingContext2D;
   private readonly imageCache = new Map<string, ImageBitmap | "pending" | "failed">();
@@ -42,6 +47,7 @@ export class Renderer {
     this.scratchCtx = sctx;
 
     this.layout = layoutNote(wasm.getPages());
+    this.allUnbounded = this.layout.pages.length > 0 && this.layout.pages.every((p) => p.unbounded);
   }
 
   /** Frames the camera on page 1, fitted and centered, and does an initial render. */
@@ -109,13 +115,26 @@ export class Renderer {
     this.updateActiveWindow(visible);
 
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
-    this.ctx.fillStyle = "#000000";
+    // Bounded notes paint each page's own background over a black gutter (the
+    // dark area between/around pages, like a document viewer). An infinite-
+    // canvas note has no gutter -- the whole canvas *is* the page -- so clear
+    // to the page's own background color instead; otherwise dark ink (Nebo's
+    // ink is predominantly black) renders invisibly on a black backdrop, since
+    // unbounded pages deliberately don't paint a page rect (see renderPage).
+    // Dark mode flips every background to its inverse to match wasm's
+    // inverted ink (white Nebo paper -> black canvas, black ink -> white).
+    this.ctx.fillStyle = this.allUnbounded ? argbToCss(this.backgroundColor(this.layout.pages[0]!)) : "#000000";
     this.ctx.fillRect(0, 0, widthPx, heightPx);
 
     const inkPxPerUnit = this.viewport.isInteracting ? devicePxPerUnit * INTERACTION_LOD_SCALE : devicePxPerUnit;
     for (const page of visible) {
       this.renderPage(page, camera, devicePxPerUnit, inkPxPerUnit, widthPx, heightPx);
     }
+  }
+
+  /** A page's background ARGB, flipped in dark mode (see theme.ts). */
+  private backgroundColor(page: PageLayout): number {
+    return darkMode.value ? invertArgb(page.color) : page.color;
   }
 
   private updateActiveWindow(visible: { index: number }[]): void {
@@ -168,7 +187,7 @@ export class Renderer {
     const screenY = (vy0 - camera.y) * devicePxPerUnit;
 
     if (!page.unbounded) {
-      this.ctx.fillStyle = argbToCss(page.color);
+      this.ctx.fillStyle = argbToCss(this.backgroundColor(page));
       this.ctx.fillRect(screenX, screenY, destW, destH);
     }
 

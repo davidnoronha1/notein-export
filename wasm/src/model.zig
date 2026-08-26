@@ -12,6 +12,7 @@ const schema = @import("sqlite/schema.zig");
 const record = @import("sqlite/record.zig");
 const json = @import("json.zig");
 const util = @import("util.zig");
+const nebo = @import("nebo.zig");
 
 pub const Bounds = struct { left: f32, top: f32, right: f32, bottom: f32 };
 
@@ -81,6 +82,23 @@ pub const AudioAsset = struct {
     creation_time: i64,
 };
 
+/// A fully-decoded ink stroke from a Nebo `.nebo` file's `ink.bink`. Unlike the
+/// `.in` path -- where `StrokeEntry` keeps only a cheap index into a SQLite row
+/// and the point payload is JSON-decoded lazily per active page (see
+/// `window.zig`) -- Nebo's ink stream is small and already fully in memory, so
+/// its points are decoded up front here. `window.zig` turns these into the same
+/// `DecodedStroke` the `.in` path produces (smoothing + tessellation + grid),
+/// so everything downstream (raster, vector export, culling) is shared.
+pub const NeboStroke = struct {
+    bounds: Bounds,
+    color: u32, // ARGB
+    width: f32,
+    points: []const Point,
+    /// Epoch milliseconds (Nebo stores microseconds; converted at decode time
+    /// to match the epoch-ms convention the rest of the pipeline uses).
+    creation_time: i64,
+};
+
 pub const Note = struct {
     alloc: std.mem.Allocator,
     archive: ZipArchive,
@@ -93,6 +111,11 @@ pub const Note = struct {
     images: []ImageAsset,
     links: []LinkAsset,
     audio: []AudioAsset,
+
+    /// Present only for Nebo notes: pre-decoded ink per page (indexed by page
+    /// index), consumed by `window.zig` instead of the lazy `strokes` path.
+    /// `null` for `.in` notes, whose ink comes from `strokes`/the SQLite db.
+    nebo_pages: ?[]const []const NeboStroke = null,
 
     pub fn pageIndexOf(self: Note, id: []const u8) ?u32 {
         for (self.pages, 0..) |p, i| {
@@ -180,6 +203,11 @@ fn readBoundsTracked(db: pager.Db, row: btree.Row, hdr: record.RecordHeader, lef
 pub fn open(alloc: std.mem.Allocator, scratch_base: std.mem.Allocator, file_bytes: []const u8) !Note {
     const entries_buf = try alloc.alloc(ZipEntry, MAX_ZIP_ENTRIES);
     const archive = try openZip(alloc, file_bytes, entries_buf);
+
+    // Nebo (`.nebo`) exports have no SQLite db; their ink lives in
+    // `pages/<id>/ink.bink`. Detect and hand off to the Nebo decoder, which
+    // produces a Note that flows through the same window/render pipeline.
+    if (nebo.isNebo(archive)) return nebo.open(alloc, archive);
 
     const db_entry = archive.findSuffix("_db") orelse return Error.DbEntryNotFound;
 

@@ -1,7 +1,8 @@
 import type { NoteinModule } from "../wasm/loader";
-import { argbToCss } from "./color";
+import { argbToCss, invertArgb } from "./color";
 import type { NoteLayout, PageLayout } from "./layout";
 import type { Viewport } from "./viewport";
+import { darkMode } from "../theme";
 
 const THUMB_WIDTH = 96;
 // Below the thumbnail's tiny scale, most stroke widths round to a fraction of
@@ -19,6 +20,11 @@ interface WorldRect {
 
 function pageWorldRect(p: PageLayout): WorldRect {
   return { left: p.x + p.boxLeft, top: p.y + p.boxTop, width: p.width, height: p.height };
+}
+
+/** A page's background ARGB, flipped in dark mode (mirrors Renderer). */
+function pageColor(p: PageLayout): number {
+  return darkMode.value ? invertArgb(p.color) : p.color;
 }
 
 /**
@@ -92,6 +98,22 @@ export class Minimap {
     }
   }
 
+  /** Rebuilds every thumbnail from scratch -- needed when the dark-mode
+   * toggle flips both ink and background colors (thumbnails are pre-painted
+   * canvases, not re-rendered per frame like the main view). Each page's
+   * generation steals wasm's active window exactly as on initial load,
+   * resyncing through onActiveWindowStolen. */
+  redraw(): void {
+    // Detaches the indicator too; re-append it so canvas insertion
+    // (before the indicator) keeps working as in the constructor.
+    this.track.innerHTML = "";
+    this.track.appendChild(this.indicator);
+    this.pageTops = [];
+    this.freeCanvas = null;
+    if (this.freeform) this.buildFreeCanvas();
+    else this.buildThumbnails();
+  }
+
   // -- Freeform (infinite-canvas) mode --------------------------------
 
   private buildFreeCanvas(): void {
@@ -152,7 +174,7 @@ export class Minimap {
     this.scratchCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), pw, ph), 0, 0);
 
     const ctx = canvas.getContext("2d")!;
-    ctx.fillStyle = argbToCss(page.color);
+    ctx.fillStyle = argbToCss(pageColor(page));
     ctx.fillRect(px, py, pw, ph);
 
     const scale = pw / page.width;
@@ -243,7 +265,7 @@ export class Minimap {
       const canvas = document.createElement("canvas");
       canvas.width = THUMB_WIDTH;
       canvas.height = thumbHeight;
-      canvas.style.backgroundColor = argbToCss(page.color);
+      canvas.style.backgroundColor = argbToCss(pageColor(page));
       wrap.appendChild(canvas);
       this.track.appendChild(wrap);
 
@@ -286,7 +308,7 @@ export class Minimap {
     this.scratchCtx.putImageData(imgData, 0, 0);
 
     const ctx = canvas.getContext("2d")!;
-    ctx.fillStyle = argbToCss(page.color);
+    ctx.fillStyle = argbToCss(pageColor(page));
     ctx.fillRect(0, 0, THUMB_WIDTH, thumbHeight);
 
     // Images first (they're typically full-bleed backgrounds/photos), then

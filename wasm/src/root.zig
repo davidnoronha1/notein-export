@@ -10,6 +10,8 @@ comptime {
     _ = @import("util.zig");
     _ = @import("json.zig");
     _ = @import("model.zig");
+    _ = @import("nebo.zig");
+    _ = @import("tests/nebo_integration_test.zig");
     _ = @import("tests/model_integration_test.zig");
     _ = @import("window.zig");
     _ = @import("tests/window_integration_test.zig");

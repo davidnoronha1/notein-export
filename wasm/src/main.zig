@@ -55,9 +55,9 @@ var g_media_zip_buf: []u8 = &.{};
 // frame, and repeatedly alloc+free-ing a list sized to the page's full item
 // count is pure per-frame overhead on top of the actual cull/raster work.
 var g_filtered_order: std.array_list.Managed(window.DrawRef) = std.array_list.Managed(window.DrawRef).init(gpa);
-// Scratch for the grid path's order-index collection (see collectVisibleOrder) --
-// reused across calls for the same reason as g_filtered_order.
 var g_grid_hits: std.array_list.Managed(u32) = std.array_list.Managed(u32).init(gpa);
+var g_vec_poly_buf: std.array_list.Managed([2]f32) = std.array_list.Managed([2]f32).init(gpa);
+var g_vec_right_buf: std.array_list.Managed([2]f32) = std.array_list.Managed([2]f32).init(gpa);
 // Monotonic counter for dedup during a grid query (see `collectVisibleOrder`):
 // an item spanning multiple visited grid cells must only be collected once.
 // Bumped once per query; compared against each item's `seen` stamp instead of
@@ -139,6 +139,13 @@ export fn get_page_count() u32 {
     return @intCast(s.note.pages.len);
 }
 
+/// True (1) when the loaded note came from a Nebo `.nebo` container --
+/// lets JS gate Nebo-only UI (e.g. the dark-mode/invert-ink toggle).
+export fn is_nebo() u32 {
+    const s = &(g_state orelse return 0);
+    return if (s.note.nebo_pages != null) 1 else 0;
+}
+
 /// Returns a pointer to `get_page_count()` `PageInfo` records (width, height,
 /// unbounded, color), in page order.
 export fn get_page_info_ptr() u32 {
@@ -160,6 +167,14 @@ export fn get_page_info_ptr() u32 {
         };
     }
     return @intFromPtr(g_page_info_buf.ptr);
+}
+
+/// Toggles dark-mode ink inversion (see raster.outputColor): stroke/shape/
+/// textbox colors come out RGB-inverted (alpha preserved) in every render
+/// path -- raster, vector export, and textbox draws -- so JS only has to
+/// flip its own background fills. Persists across `open` calls.
+export fn set_invert_colors(v: u32) void {
+    raster.invert_colors = v != 0;
 }
 
 /// Sets which pages should be decoded right now (`count` u32 page indices
@@ -313,24 +328,24 @@ export fn get_vector_content_count(page_index: u32, x: f32, y: f32, w: f32, h: f
                 .stroke => {
                     const st = content.strokes[ref.index];
                     const t: f64 = @floatFromInt(st.creation_time);
-                    // Reuse the polygon already tessellated at decode time
-                    // (see window.zig's decodeStroke) instead of redoing it.
-                    const poly = if (st.tess_poly.len >= 3) st.tess_poly else tessellate.tessellateStrokeScratch(st.points, st.width);
+                    tessellate.smoothAndTessellateAdaptive(st.points, st.width, 4.0, st.is_calligraphic, &g_vec_poly_buf, &g_vec_right_buf) catch continue;
+                    const poly = g_vec_poly_buf.items;
                     if (poly.len < 3) continue;
-                    appendPoly(&polys, &verts, st.color, t, poly) catch break;
+                    appendPoly(&polys, &verts, raster.outputColor(st.color), t, poly) catch break;
                 },
                 .shape => {
                     const sh = content.shapes[ref.index];
                     const t: f64 = @floatFromInt(sh.creation_time);
+                    const color = raster.outputColor(sh.color);
                     if (sh.points.len >= 3) {
                         var i: usize = 0;
                         while (i < sh.points.len) : (i += 1) {
                             const quad = tessellate.quadForLine(sh.points[i], sh.points[(i + 1) % sh.points.len], sh.width);
-                            appendPoly(&polys, &verts, sh.color, t, &quad) catch break;
+                            appendPoly(&polys, &verts, color, t, &quad) catch break;
                         }
                     } else if (sh.points.len == 2) {
                         const quad = tessellate.quadForLine(sh.points[0], sh.points[1], sh.width);
-                        appendPoly(&polys, &verts, sh.color, t, &quad) catch {};
+                        appendPoly(&polys, &verts, color, t, &quad) catch {};
                     }
                 },
             }
@@ -401,7 +416,7 @@ export fn get_visible_textbox_count(page_index: u32, x: f32, y: f32, w: f32, h: 
                 .right = t.bounds.right,
                 .bottom = t.bounds.bottom,
                 .size = t.text_size,
-                .color = t.color,
+                .color = raster.outputColor(t.color),
                 .text_ptr = @intFromPtr(t.text.ptr),
                 .text_len = @intCast(t.text.len),
                 .creation_time = @floatFromInt(t.creation_time),

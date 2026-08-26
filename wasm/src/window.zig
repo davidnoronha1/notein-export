@@ -13,12 +13,7 @@ pub const DecodedStroke = struct {
     width: f32,
     points: []const Point,
     creation_time: i64,
-    /// The stroke's fill polygon, tessellated once here at decode time (see
-    /// decodeStroke) instead of on every frame it's visible in -- `raster.zig`
-    /// only falls back to re-tessellating on the fly when a render call's
-    /// min-width floor needs a wider ribbon than this (thumbnail generation;
-    /// never the interactive path). Empty for degenerate (<2 point) strokes.
-    tess_poly: [][2]f32 = &.{},
+    is_calligraphic: bool = false,
 };
 
 pub const DecodedShape = struct {
@@ -83,6 +78,21 @@ const readI64Col = util.readColumnI64;
 const clampCell = util.clampCell;
 const gridCellIndex = util.gridCellIndex;
 
+fn smoothPressure(alloc: std.mem.Allocator, raw: []const Point) ![]Point {
+    if (raw.len == 0) return &.{};
+    const PRESSURE_SMOOTH_RADIUS = 2;
+    const work = try alloc.alloc(Point, raw.len);
+    for (raw, 0..) |pt, wi| {
+        const lo = if (wi >= PRESSURE_SMOOTH_RADIUS) wi - PRESSURE_SMOOTH_RADIUS else 0;
+        const hi = @min(raw.len, wi + PRESSURE_SMOOTH_RADIUS + 1);
+        var sum: f32 = 0;
+        var k = lo;
+        while (k < hi) : (k += 1) sum += raw[k].p;
+        work[wi] = .{ .x = pt.x, .y = pt.y, .p = sum / @as(f32, @floatFromInt(hi - lo)) };
+    }
+    return work;
+}
+
 fn decodeStroke(alloc: std.mem.Allocator, note: *const model.Note, entry: model.StrokeEntry) !DecodedStroke {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit(); // JSON parse tree is scratch; only the extracted fields below outlive it.
@@ -96,6 +106,7 @@ fn decodeStroke(alloc: std.mem.Allocator, note: *const model.Note, entry: model.
         .width = 1,
         .points = &.{},
         .creation_time = 0,
+        .is_calligraphic = false,
     };
 
     const color = argbFromSigned(parsed.color);
@@ -106,115 +117,30 @@ fn decodeStroke(alloc: std.mem.Allocator, note: *const model.Note, entry: model.
     for (parsed.points, 0..) |pj, i| {
         raw_points[i] = .{ .x = pj.x, .y = pj.y, .p = pj.p };
     }
-    const points = try smoothPoints(alloc, raw_points);
-    const tess_poly = try tessellatePoints(alloc, points, width);
+    const points = try smoothPressure(alloc, raw_points);
 
-    return .{ .bounds = entry.bounds, .color = color, .width = width, .points = points, .creation_time = creation_time, .tess_poly = tess_poly };
+    return .{
+        .bounds = entry.bounds,
+        .color = color,
+        .width = width,
+        .points = points,
+        .creation_time = creation_time,
+        .is_calligraphic = false,
+    };
 }
 
-fn tessellatePoints(alloc: std.mem.Allocator, points: []const Point, width: f32) ![][2]f32 {
-    if (points.len < 2) return &.{};
-    const buf = try alloc.alloc([2]f32, points.len * 2);
-    return tessellate.tessellateStroke(points, width, buf);
-}
-
-/// Catmull-Rom-interpolates a raw stylus sample path into a denser point set
-/// so `tessellateStroke`'s ribbon polygon follows a smooth curve instead of
-/// straight segments between sparse raw samples (visible as faceted/angular
-/// bumps on curves like "m"/"e" once zoomed in). Subdivision count per
-/// segment adapts to its length, capped to bound point-count blowup on
-/// already-dense or very long strokes.
-fn smoothPoints(alloc: std.mem.Allocator, raw: []const Point) ![]Point {
-    if (raw.len < 3) return alloc.dupe(Point, raw);
-
-    const MAX_SUBDIV = 24;
-    const UNITS_PER_STEP = 1.0;
-    const MAX_TOTAL_POINTS = 12000;
-
-    var out = std.array_list.Managed(Point).init(alloc);
-    errdefer out.deinit();
-    try out.append(raw[0]);
-
-    var i: usize = 0;
-    while (i + 1 < raw.len) : (i += 1) {
-        const p0 = raw[if (i == 0) 0 else i - 1];
-        const p1 = raw[i];
-        const p2 = raw[i + 1];
-        const p3 = raw[if (i + 2 < raw.len) i + 2 else raw.len - 1];
-
-        const seg_len = @sqrt((p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
-        const remaining_budget = if (MAX_TOTAL_POINTS > out.items.len) MAX_TOTAL_POINTS - out.items.len else 0;
-        const steps: usize = @min(@min(MAX_SUBDIV, remaining_budget), @max(1, @as(usize, @intFromFloat(seg_len / UNITS_PER_STEP))));
-
-        // AVX2 (8-wide) batch: process 8 t-values at once with Vec8, tail scalar.
-        // MAX_SUBDIV is 24, so a typical segment does 3 batches of 8. WASM SIMD is
-        // 128-bit (4-wide) — Zig lowers Vec8 to 2× Vec4, still 2× fewer loop
-        // iterations than scalar. Native x86_64 with AVX2 does 8-wide in one go.
-        const Vec8 = @Vector(8, f32);
-        var s: usize = 1;
-        while (s + 7 <= steps) : (s += 8) {
-            var t_vec: Vec8 = undefined;
-            inline for (0..8) |k| {
-                const sk = s + k;
-                t_vec[k] = @as(f32, @floatFromInt(sk)) / @as(f32, @floatFromInt(steps));
-            }
-            const batch = catmullRomBatch8(p0, p1, p2, p3, t_vec);
-            for (batch) |pt| try out.append(pt);
-            if (out.items.len >= MAX_TOTAL_POINTS) break;
-        }
-        // Tail scalar (covers the 9th point case: 8+1)
-        while (s <= steps) : (s += 1) {
-            const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(steps));
-            try out.append(catmullRom(p0, p1, p2, p3, t));
-        }
-        if (out.items.len >= MAX_TOTAL_POINTS) break;
-    }
-    return out.toOwnedSlice();
-}
-
-fn catmullRom(p0: Point, p1: Point, p2: Point, p3: Point, t: f32) Point {
-    const Vec3 = @Vector(3, f32);
-    const p0v: Vec3 = .{ p0.x, p0.y, p0.p };
-    const p1v: Vec3 = .{ p1.x, p1.y, p1.p };
-    const p2v: Vec3 = .{ p2.x, p2.y, p2.p };
-    const p3v: Vec3 = .{ p3.x, p3.y, p3.p };
-    const t2 = t * t;
-    const t3 = t2 * t;
-    const tv: Vec3 = @splat(t);
-    const t2v: Vec3 = @splat(t2);
-    const t3v: Vec3 = @splat(t3);
-    const res: Vec3 = @as(Vec3, @splat(0.5)) * (
-        @as(Vec3, @splat(2)) * p1v +
-        (-p0v + p2v) * tv +
-        (@as(Vec3, @splat(2)) * p0v - @as(Vec3, @splat(5)) * p1v + @as(Vec3, @splat(4)) * p2v - p3v) * t2v +
-        (-p0v + @as(Vec3, @splat(3)) * p1v - @as(Vec3, @splat(3)) * p2v + p3v) * t3v
-    );
-    return .{ .x = res[0], .y = res[1], .p = res[2] };
-}
-
-// AVX2-width (8-lane) batch version — computes 8 Catmull-Rom points in parallel.
-// Each lane k holds t[k]; x/y/p are computed as Vec8. This is the hot path for
-// smoothPoints: 24 subdivisions → 3× Vec8 batches (covers 9 points as 8+1).
-fn catmullRomBatch8(p0: Point, p1: Point, p2: Point, p3: Point, t: @Vector(8, f32)) [8]Point {
-    const Vec8 = @Vector(8, f32);
-    const t2: Vec8 = t * t;
-    const t3: Vec8 = t2 * t;
-
-    const p0x: Vec8 = @splat(p0.x); const p0y: Vec8 = @splat(p0.y); const p0p: Vec8 = @splat(p0.p);
-    const p1x: Vec8 = @splat(p1.x); const p1y: Vec8 = @splat(p1.y); const p1p: Vec8 = @splat(p1.p);
-    const p2x: Vec8 = @splat(p2.x); const p2y: Vec8 = @splat(p2.y); const p2p: Vec8 = @splat(p2.p);
-    const p3x: Vec8 = @splat(p3.x); const p3y: Vec8 = @splat(p3.y); const p3p: Vec8 = @splat(p3.p);
-
-    const two: Vec8 = @splat(2); const three: Vec8 = @splat(3); const four: Vec8 = @splat(4); const five: Vec8 = @splat(5);
-    const half: Vec8 = @splat(0.5);
-
-    const x = half * (two * p1x + (-p0x + p2x) * t + (two * p0x - five * p1x + four * p2x - p3x) * t2 + (-p0x + three * p1x - three * p2x + p3x) * t3);
-    const y = half * (two * p1y + (-p0y + p2y) * t + (two * p0y - five * p1y + four * p2y - p3y) * t2 + (-p0y + three * p1y - three * p2y + p3y) * t3);
-    const p = half * (two * p1p + (-p0p + p2p) * t + (two * p0p - five * p1p + four * p2p - p3p) * t2 + (-p0p + three * p1p - three * p2p + p3p) * t3);
-
-    var out: [8]Point = undefined;
-    inline for (0..8) |k| out[k] = .{ .x = x[k], .y = y[k], .p = p[k] };
-    return out;
+/// Turns a Nebo raw-decoded stroke (already absolute points + pressure, see
+/// nebo.zig) into a `DecodedStroke` with smoothed pressure.
+fn decodeNeboStroke(alloc: std.mem.Allocator, ns: model.NeboStroke) !DecodedStroke {
+    const points = try smoothPressure(alloc, ns.points);
+    return .{
+        .bounds = ns.bounds,
+        .color = ns.color,
+        .width = ns.width,
+        .points = points,
+        .creation_time = ns.creation_time,
+        .is_calligraphic = true,
+    };
 }
 
 fn decodeShape(alloc: std.mem.Allocator, note: *const model.Note, entry: model.ShapeEntry) !DecodedShape {
@@ -366,7 +292,6 @@ pub const Window = struct {
     fn freeContent(self: *Window, content: PageContent) void {
         for (content.strokes) |s| {
             self.alloc.free(s.points);
-            self.alloc.free(s.tess_poly);
         }
         self.alloc.free(content.strokes);
         for (content.shapes) |s| self.alloc.free(s.points);
@@ -405,8 +330,17 @@ pub const Window = struct {
 
     fn decodePage(self: *Window, page_index: u32) !PageContent {
         var strokes = std.array_list.Managed(DecodedStroke).init(self.alloc);
-        for (self.note.strokes) |e| {
-            if (e.page_index == page_index) try strokes.append(try decodeStroke(self.alloc, self.note, e));
+        if (self.note.nebo_pages) |pages| {
+            // Nebo path: ink is already decoded to points in model.open; just
+            // run the same smoothing + tessellation the .in path uses so the
+            // ribbons match. Nebo notes have no shapes/text boxes.
+            if (page_index < pages.len) {
+                for (pages[page_index]) |ns| try strokes.append(try decodeNeboStroke(self.alloc, ns));
+            }
+        } else {
+            for (self.note.strokes) |e| {
+                if (e.page_index == page_index) try strokes.append(try decodeStroke(self.alloc, self.note, e));
+            }
         }
         var shapes = std.array_list.Managed(DecodedShape).init(self.alloc);
         for (self.note.shapes) |e| {

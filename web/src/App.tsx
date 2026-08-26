@@ -1,10 +1,11 @@
 import { signal } from "@preact/signals";
 import type { ExportScale } from "./export";
 import { app } from "./controller";
-import { CloseIcon, PlusIcon, MinusIcon } from "./icons";
+import { CloseIcon, PlusIcon, MinusIcon, MoonIcon, SunIcon } from "./icons";
 import { MediaToggleButton, MediaPanel } from "./media-panel";
 import { LinksToggleButton, LinksPanel } from "./links-panel";
 import { HelpToggleButton } from "./help-panel";
+import { darkMode } from "./theme";
 
 const exportScale = signal<ExportScale>(4);
 
@@ -35,7 +36,7 @@ function DropZone() {
           app.dropMessage.value
         ) : (
           <>
-            Drag &amp; drop a Notein <code>.in</code> file here
+            Drag &amp; drop a Notein <code>.in</code> or Nebo <code>.nebo</code> file here
           </>
         )}
       </p>
@@ -47,7 +48,7 @@ function DropZone() {
           fileInputEl = el;
         }}
         type="file"
-        accept=".in"
+        accept=".in,.nebo"
         style={{ display: "none" }}
         onChange={(e) => {
           const input = e.currentTarget;
@@ -130,6 +131,17 @@ function ExportPanel() {
   );
 }
 
+/** Dark-mode toggle (Nebo notes only -- see AppController.toggleDarkMode):
+ * flips the canvas to an inverted backdrop with light ink. */
+function ThemeToggleButton() {
+  if (!app.isNebo.value) return null;
+  return (
+    <button type="button" aria-label={darkMode.value ? "Switch to light mode" : "Switch to dark mode"} class={darkMode.value ? "active" : ""} onClick={() => app.toggleDarkMode()}>
+      {darkMode.value ? <SunIcon /> : <MoonIcon />}
+    </button>
+  );
+}
+
 function ExportControl() {
   if (!app.noteLoaded.value) return null;
   const busy = app.pageExportBusy.value;
@@ -160,6 +172,7 @@ function ExportControl() {
       <div class="sep" />
       <MediaToggleButton />
       <LinksToggleButton />
+      <ThemeToggleButton />
     </div>
   );
 }
