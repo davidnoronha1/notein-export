@@ -1,5 +1,7 @@
 # Notein & Nebo Note Viewer
 
+![Screenshot](assets/screenshot.png)
+
 Browser-based, privacy-first viewer and vector exporter for **Notein** (`.in`) and **Nebo** (`.nebo`) handwriting notes. Drop a file in to pan, zoom, inspect media, and export vector ink — everything executes locally in your browser via WebAssembly.
 
 ---
@@ -73,15 +75,15 @@ zig test src/root.zig   # Runs all 34 native unit and integration tests
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A[Drop .in / .nebo] --> B[WASM Engine]
-    B --> C[Unzip & Replay WAL]
-    C --> D[Parse SQLite / BINK]
-    D --> E[Layout Coordinates]
-    E --> F[Centripetal Splines]
-    F --> G[Adaptive Tessellation]
-    G --> H[Scanline Rasterizer]
-    H --> I[HTML5 Canvas Viewport]
+flowchart TD
+    A["Drop .in / .nebo"] --> B["WASM Engine"]
+    B --> C["Unzip & Replay WAL"]
+    C --> D["Parse SQLite / BINK"]
+    D --> E["Layout Coordinates"]
+    E --> F["Centripetal Splines"]
+    F --> G["Adaptive Tessellation"]
+    G --> H["Scanline Rasterizer"]
+    H --> I["HTML5 Canvas Viewport"]
 ```
 
 ---
