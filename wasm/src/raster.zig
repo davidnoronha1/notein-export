@@ -192,6 +192,15 @@ pub const Canvas = struct {
             }
         }
     }
+    pub fn fillDisc(self: Canvas, center: [2]f32, radius: f32, argb: u32) void {
+        const DISC_SEGS: usize = 12;
+        var disc: [DISC_SEGS][2]f32 = undefined;
+        inline for (0..DISC_SEGS) |k| {
+            const angle = @as(f32, @floatFromInt(k)) * (2.0 * std.math.pi / @as(f32, @floatFromInt(DISC_SEGS)));
+            disc[k] = .{ center[0] + radius * @cos(angle), center[1] + radius * @sin(angle) };
+        }
+        self.fillPolygon(&disc, argb);
+    }
 };
 
 const SUBSAMPLES: usize = 4;
@@ -266,6 +275,28 @@ fn addSpanCoverage(coverage: []f32, x0: f32, x1: f32, weight: f32) void {
     if (ix1 >= 0 and ix1 < coverage.len) {
         coverage[@intCast(ix1)] += (cx1 - @as(f32, @floatFromInt(ix1))) * weight;
     }
+}
+
+const builtin = @import("builtin");
+var g_debug_alloc: if (builtin.target.cpu.arch != .wasm32) std.heap.DebugAllocator(.{}) else void = if (builtin.target.cpu.arch != .wasm32) .init else {};
+fn getGpa() std.mem.Allocator {
+    return if (builtin.target.cpu.arch == .wasm32) std.heap.wasm_allocator else g_debug_alloc.allocator();
+}
+
+var g_poly_buf: ?std.array_list.Managed([2]f32) = null;
+var g_right_buf: ?std.array_list.Managed([2]f32) = null;
+
+fn drawStroke(canvas: Canvas, s: window.DecodedStroke, min_width_world: f32) void {
+    if (s.points.len == 0) return;
+    const width = @max(s.width, min_width_world);
+
+    if (g_poly_buf == null) g_poly_buf = std.array_list.Managed([2]f32).init(getGpa());
+    if (g_right_buf == null) g_right_buf = std.array_list.Managed([2]f32).init(getGpa());
+
+    tessellate.smoothAndTessellateAdaptive(s.points, width, canvas.scale, s.is_calligraphic, &g_poly_buf.?, &g_right_buf.?) catch return;
+    const poly = g_poly_buf.?.items;
+
+    if (poly.len >= 3) canvas.fillPolygon(poly, outputColor(s.color));
 }
 
 var scratch_poly: [8192][2]f32 = undefined;
@@ -356,27 +387,6 @@ pub fn renderPageContent(canvas: Canvas, content: window.PageContent, min_width_
             .shape => drawShape(canvas, content.shapes[ref.index], min_width_world),
         }
     }
-}
-
-const builtin = @import("builtin");
-var g_debug_alloc: if (builtin.target.cpu.arch != .wasm32) std.heap.DebugAllocator(.{}) else void = if (builtin.target.cpu.arch != .wasm32) .init else {};
-fn getGpa() std.mem.Allocator {
-    return if (builtin.target.cpu.arch == .wasm32) std.heap.wasm_allocator else g_debug_alloc.allocator();
-}
-var g_poly_buf: ?std.array_list.Managed([2]f32) = null;
-var g_right_buf: ?std.array_list.Managed([2]f32) = null;
-
-fn drawStroke(canvas: Canvas, s: window.DecodedStroke, min_width_world: f32) void {
-    if (s.points.len == 0) return;
-    const width = @max(s.width, min_width_world);
-
-    if (g_poly_buf == null) g_poly_buf = std.array_list.Managed([2]f32).init(getGpa());
-    if (g_right_buf == null) g_right_buf = std.array_list.Managed([2]f32).init(getGpa());
-
-    tessellate.smoothAndTessellateAdaptive(s.points, width, canvas.scale, s.is_calligraphic, &g_poly_buf.?, &g_right_buf.?) catch return;
-    const poly = g_poly_buf.?.items;
-
-    if (poly.len >= 3) canvas.fillPolygon(poly, outputColor(s.color));
 }
 
 fn drawShape(canvas: Canvas, s: window.DecodedShape, min_width_world: f32) void {

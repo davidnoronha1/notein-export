@@ -4,8 +4,8 @@ import type { NoteLayout } from "./canvas/layout";
 import { renderRegionToCanvas, renderRegionToSvg, type WorldRect } from "./canvas/export-render";
 
 /** Output pixels per world unit. World units are the note's own paper-spec
- * units (dp-like); 4x is a print-quality default, 1x/2x are lighter/faster. */
-export type ExportScale = 1 | 2 | 4;
+ * units (dp-like); 4x/8x are ultra/print-quality, 1x/2x are lighter/faster. */
+export type ExportScale = 1 | 2 | 4 | 8;
 
 function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   return new Promise((resolve, reject) => {

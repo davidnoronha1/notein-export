@@ -1,4 +1,5 @@
 import { signal } from "@preact/signals";
+import { useRef } from "preact/hooks";
 import type { ExportScale } from "./export";
 import { app } from "./controller";
 import { CloseIcon, PlusIcon, MinusIcon, MoonIcon, SunIcon } from "./icons";
@@ -9,17 +10,23 @@ import { darkMode } from "./theme";
 
 const exportScale = signal<ExportScale>(4);
 
-let fileInputEl: HTMLInputElement | null = null;
-
 function onFileChosen(file: File | undefined): void {
   if (file) void app.openFile(file);
 }
 
 function DropZone() {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   return (
     <div
       id="drop-zone"
-      class={[app.dropZoneVisible.value ? "" : "hidden", app.dropZoneLoading.value ? "loading" : "", app.dropZoneDragOver.value ? "drag-over" : ""].join(" ").trim()}
+      class={[
+        app.dropZoneVisible.value ? "" : "hidden",
+        app.dropZoneLoading.value ? "loading" : "",
+        app.dropZoneDragOver.value ? "drag-over" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
       onDragOver={(e) => {
         e.preventDefault();
         app.dropZoneDragOver.value = true;
@@ -31,6 +38,7 @@ function DropZone() {
         onFileChosen(e.dataTransfer?.files?.[0]);
       }}
     >
+      <img src="/favicon.svg" alt="Notein Viewer Logo" class="drop-zone-icon" width="256" height="256" />
       <p id="drop-message">
         {app.dropZoneLoading.value ? (
           app.dropMessage.value
@@ -40,13 +48,11 @@ function DropZone() {
           </>
         )}
       </p>
-      <button type="button" disabled={app.dropZoneLoading.value} onClick={() => fileInputEl?.click()}>
+      <button type="button" disabled={app.dropZoneLoading.value} onClick={() => fileInputRef.current?.click()}>
         Or choose a file…
       </button>
       <input
-        ref={(el) => {
-          fileInputEl = el;
-        }}
+        ref={fileInputRef}
         type="file"
         accept=".in,.nebo"
         style={{ display: "none" }}
@@ -88,8 +94,27 @@ function ZoomControl() {
 function SelectionLayer() {
   const r = app.dragRect.value;
   return (
-    <div id="selection-overlay" class={app.selectMode.value ? "active" : ""} onPointerDown={(e) => app.onSelectPointerDown(e)} onPointerMove={(e) => app.onSelectPointerMove(e)} onPointerUp={(e) => app.onSelectPointerUp(e)}>
-      <div id="selection-rect" style={r ? { display: "block", left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` } : { display: "none" }} />
+    <div
+      id="selection-overlay"
+      class={app.selectMode.value ? "active" : ""}
+      onPointerDown={(e) => app.onSelectPointerDown(e)}
+      onPointerMove={(e) => app.onSelectPointerMove(e)}
+      onPointerUp={(e) => app.onSelectPointerUp(e)}
+    >
+      <div
+        id="selection-rect"
+        style={
+          r
+            ? {
+                display: "block",
+                left: `${r.left}px`,
+                top: `${r.top}px`,
+                width: `${r.width}px`,
+                height: `${r.height}px`,
+              }
+            : { display: "none" }
+        }
+      />
     </div>
   );
 }
@@ -97,22 +122,16 @@ function SelectionLayer() {
 function ExportPanel() {
   const pos = app.exportPanelPos.value;
   if (!pos) return null;
-  // Re-centers/clamps against the panel's actual measured size once mounted
-  // (the position `pos` gives us is only a rough screen-anchor guess from the
-  // selection drag -- see AppController.onSelectPointerUp).
-  const onMount = (el: HTMLDivElement | null): void => {
-    if (!el || !app.canvasEl) return;
-    const rect = app.canvasEl.getBoundingClientRect();
-    const panelRect = el.getBoundingClientRect();
-    const left = Math.max(8, Math.min(rect.width - panelRect.width - 8, pos.left - panelRect.width / 2));
-    const fitsBelow = pos.top + panelRect.height <= rect.height - 8;
-    const top = fitsBelow ? pos.top : Math.max(8, pos.top - panelRect.height - 16);
-    el.style.left = `${left}px`;
-    el.style.top = `${top}px`;
-  };
   const busy = app.regionExportBusy.value;
   return (
-    <div id="export-panel" ref={onMount}>
+    <div
+      id="export-panel"
+      style={{
+        left: `${pos.left}px`,
+        top: `${pos.top}px`,
+        transform: "translateX(-50%)",
+      }}
+    >
       <div class="row">
         <button type="button" disabled={busy} onClick={() => app.exportRegion("png", exportScale.value)}>
           Export PNG
@@ -136,7 +155,12 @@ function ExportPanel() {
 function ThemeToggleButton() {
   if (!app.isNebo.value) return null;
   return (
-    <button type="button" aria-label={darkMode.value ? "Switch to light mode" : "Switch to dark mode"} class={darkMode.value ? "active" : ""} onClick={() => app.toggleDarkMode()}>
+    <button
+      type="button"
+      aria-label={darkMode.value ? "Switch to light mode" : "Switch to dark mode"}
+      class={darkMode.value ? "active" : ""}
+      onClick={() => app.toggleDarkMode()}
+    >
       {darkMode.value ? <SunIcon /> : <MoonIcon />}
     </button>
   );
@@ -147,10 +171,15 @@ function ExportControl() {
   const busy = app.pageExportBusy.value;
   return (
     <div id="export-control">
-      <select aria-label="Export resolution" value={exportScale.value} onChange={(e) => (exportScale.value = Number(e.currentTarget.value) as ExportScale)}>
+      <select
+        aria-label="Export resolution"
+        value={exportScale.value}
+        onChange={(e) => (exportScale.value = Number(e.currentTarget.value) as ExportScale)}
+      >
         <option value="1">1x</option>
         <option value="2">2x</option>
         <option value="4">4x</option>
+        <option value="8">8x</option>
       </select>
       <button type="button" class={app.selectMode.value ? "active" : ""} onClick={() => app.toggleSelectMode()}>
         Select region…
@@ -158,13 +187,25 @@ function ExportControl() {
       {app.notePageExportPossible.value && (
         <>
           <div class="sep" />
-          <button type="button" disabled={!app.pageExportEnabled.value || busy} onClick={() => app.exportPage("png", exportScale.value)}>
+          <button
+            type="button"
+            disabled={!app.pageExportEnabled.value || busy}
+            onClick={() => app.exportPage("png", exportScale.value)}
+          >
             Export page PNG
           </button>
-          <button type="button" disabled={!app.pageExportEnabled.value || busy} onClick={() => app.exportPage("pdf", exportScale.value)}>
+          <button
+            type="button"
+            disabled={!app.pageExportEnabled.value || busy}
+            onClick={() => app.exportPage("pdf", exportScale.value)}
+          >
             Export page PDF
           </button>
-          <button type="button" disabled={!app.pageExportEnabled.value || busy} onClick={() => app.exportPage("svg", exportScale.value)}>
+          <button
+            type="button"
+            disabled={!app.pageExportEnabled.value || busy}
+            onClick={() => app.exportPage("svg", exportScale.value)}
+          >
             Export page SVG
           </button>
         </>
@@ -187,8 +228,8 @@ export function App() {
             if (el) app.attachCanvas(el);
           }}
         />
-        <div id="status">{app.status.value}</div>
-        <div id="stats">{app.statsText.value}</div>
+        {app.status.value ? <div id="status">{app.status.value}</div> : null}
+        {app.statsText.value ? <div id="stats">{app.statsText.value}</div> : null}
         <div id="progress-bar" class={app.progressVisible.value ? "" : "hidden"}>
           <div id="progress-bar-fill" />
         </div>
@@ -202,7 +243,7 @@ export function App() {
       </div>
       <div
         id="minimap"
-        class={[app.noteLoaded.value ? "" : "hidden", app.minimapFreeform.value ? "free" : ""].join(" ").trim()}
+        class={[app.noteLoaded.value ? "" : "hidden", app.minimapFreeform.value ? "free" : ""].filter(Boolean).join(" ")}
         ref={(el) => {
           if (el) app.attachMinimapContainer(el);
         }}

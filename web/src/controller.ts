@@ -359,7 +359,7 @@ export class AppController {
       this.syncZoomUI();
       this.syncPageExportUI();
       this.noteVersion.value++;
-      this.status.value = `${file.name} — ${this.renderer.layout.pages.length} page(s)`;
+      this.status.value = "";
     } catch (err) {
       console.error(err);
       this.status.value = `Failed to load ${file.name}: ${(err as Error).message}`;

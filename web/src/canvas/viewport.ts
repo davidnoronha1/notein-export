@@ -6,8 +6,8 @@ export interface Camera {
   zoom: number; // world units -> device pixels
 }
 
-export const MIN_ZOOM = 0.05;
-export const MAX_ZOOM = 8;
+export const MIN_ZOOM = 0.005;
+export const MAX_ZOOM = 64;
 
 /**
  * Owns pan/zoom camera state and wires up pointer/wheel input on `canvas`.

@@ -32,8 +32,8 @@ type Overlay = ({ kind: "image"; item: ImageDraw } | { kind: "text"; item: TextB
 // well below that, allocation just gets slow/crash-prone). Silently
 // downscales rather than failing -- exporting *something* crisp beats
 // erroring out.
-const MAX_EXPORT_DIMENSION = 8000;
-const MAX_EXPORT_PIXELS = 40_000_000;
+const MAX_EXPORT_DIMENSION = 16384;
+const MAX_EXPORT_PIXELS = 100_000_000;
 
 /** Reduces `pixelsPerUnit` if needed so the output canvas stays within
  * MAX_EXPORT_DIMENSION per side and MAX_EXPORT_PIXELS total. */
