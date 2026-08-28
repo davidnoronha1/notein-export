@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "build:wasm": "cd ../wasm && zig build -Doptimize=ReleaseSmall && (command -v wasm-opt >/dev/null && wasm-opt --all-features -Oz ../web/src/wasm/notein.wasm -o ../web/src/wasm/notein.wasm || true)",
+    "build:wasm": "cd ../wasm && zig build -Doptimize=ReleaseSmall && (command -v wasm-opt >/dev/null && wasm-opt --enable-bulk-memory --enable-mutable-globals --enable-nontrapping-float-to-int --enable-sign-ext --enable-simd --enable-multivalue --enable-reference-types -Oz ../web/src/wasm/notein.wasm -o ../web/src/wasm/notein.wasm || true)",
     "dev": "npm run build:wasm && vite",
     "build": "npm run build:wasm && vite build",
     "preview": "vite preview"
