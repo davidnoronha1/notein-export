@@ -22,7 +22,7 @@ All web/wasm commands run from `web/` (the wasm build is invoked as a prestep vi
 cd web
 bun install
 bun run dev          # zig build (wasm) + vite dev server -> http://localhost:5173, rebuilds wasm on change
-bun run build         # zig build -Doptimize=ReleaseSmall + vite build -> web/dist
+bun run build         # zig build (ReleaseSmall + strip) + vite build -> web/dist
 bun run preview       # preview a production build
 ```
 
